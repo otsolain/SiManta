@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <QScreen>
 #include <QProcess>
+#include <QSettings>
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QScrollBar>
@@ -296,16 +297,16 @@ int main(int argc, char* argv[])
     app.setApplicationVersion("1.0.0");
     app.setOrganizationName("LabMonitor");
 
-    // Command line parsing
+    // Command line parsing (still supported for overrides)
     QCommandLineParser parser;
-    parser.setApplicationDescription("Lab Monitor Student Agent — captures screen and streams to teacher console");
+    parser.setApplicationDescription("Lab Monitor Student Agent");
     parser.addHelpOption();
     parser.addVersionOption();
 
     QCommandLineOption teacherOpt(
         QStringList() << "t" << "teacher",
-        "Teacher console IP address (default: 127.0.0.1)",
-        "ip", "127.0.0.1"
+        "Teacher console IP address",
+        "ip", ""
     );
 
     QCommandLineOption portOpt(
@@ -340,23 +341,55 @@ int main(int argc, char* argv[])
 
     parser.process(app);
 
-    // Check grim
+    // ── Load config from file (config.ini next to executable) ──
+    QString configPath = QCoreApplication::applicationDirPath() + "/config.ini";
+    QSettings config(configPath, QSettings::IniFormat);
+
+    // Read settings: command line > config file > defaults
+    QString teacherIp = parser.value(teacherOpt);
+    if (teacherIp.isEmpty()) {
+        teacherIp = config.value("teacher_ip", "127.0.0.1").toString();
+    }
+    uint16_t port = parser.isSet(portOpt)
+        ? parser.value(portOpt).toUShort()
+        : config.value("port", LabMonitor::DEFAULT_PORT).toUInt();
+    int interval = parser.isSet(intervalOpt)
+        ? parser.value(intervalOpt).toInt()
+        : config.value("interval", LabMonitor::DEFAULT_CAPTURE_MS).toInt();
+    int quality = parser.isSet(qualityOpt)
+        ? parser.value(qualityOpt).toInt()
+        : config.value("quality", LabMonitor::DEFAULT_QUALITY).toInt();
+    double scale = parser.isSet(scaleOpt)
+        ? parser.value(scaleOpt).toDouble()
+        : config.value("scale", LabMonitor::DEFAULT_SCALE).toDouble();
+
+    // Save config (auto-create config.ini on first run)
+    config.setValue("teacher_ip", teacherIp);
+    config.setValue("port", port);
+    config.setValue("interval", interval);
+    config.setValue("quality", quality);
+    config.setValue("scale", scale);
+    config.sync();
+
+    // Check screen capture availability (Linux only — grim required)
+#ifndef Q_OS_WIN
     if (!LabMonitor::ScreenCapturer::isGrimAvailable()) {
         QTextStream(stderr) << "ERROR: 'grim' is not installed. Please install grim for screen capture.\n";
         QTextStream(stderr) << "  Arch Linux: sudo pacman -S grim\n";
         QTextStream(stderr) << "  Ubuntu:     sudo apt install grim\n";
         return 1;
     }
+#endif
 
     // Create and configure agent
     LabMonitor::StudentAgent agent;
     g_agent = &agent;
 
-    agent.setTeacherHost(parser.value(teacherOpt));
-    agent.setTeacherPort(parser.value(portOpt).toUShort());
-    agent.setCaptureInterval(parser.value(intervalOpt).toInt());
-    agent.setCaptureQuality(parser.value(qualityOpt).toInt());
-    agent.setCaptureScale(parser.value(scaleOpt).toDouble());
+    agent.setTeacherHost(teacherIp);
+    agent.setTeacherPort(port);
+    agent.setCaptureInterval(interval);
+    agent.setCaptureQuality(quality);
+    agent.setCaptureScale(scale);
 
     // Signal handling for graceful shutdown
     signal(SIGINT, signalHandler);
@@ -438,8 +471,9 @@ int main(int argc, char* argv[])
     QTextStream(stdout) << "╔══════════════════════════════════════════╗\n";
     QTextStream(stdout) << "║     Lab Monitor — Student Agent v1.0    ║\n";
     QTextStream(stdout) << "╚══════════════════════════════════════════╝\n";
-    QTextStream(stdout) << "  Teacher: " << parser.value(teacherOpt)
-                        << ":" << parser.value(portOpt) << "\n";
+    QTextStream(stdout) << "  Teacher: " << teacherIp
+                        << ":" << port << "\n";
+    QTextStream(stdout) << "  Config:  " << configPath << "\n";
     QTextStream(stdout) << "  Hostname: " << LabMonitor::getLocalHostname() << "\n";
     QTextStream(stdout) << "  User: " << LabMonitor::getLocalUsername() << "\n";
     QTextStream(stdout) << "\n";

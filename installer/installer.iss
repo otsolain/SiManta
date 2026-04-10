@@ -50,16 +50,15 @@ Source: "dist\student\*"; DestDir: "{app}\student"; Flags: ignoreversion recurse
 ; Teacher shortcuts
 Name: "{group}\Lab Monitor Teacher"; Filename: "{app}\teacher\lab-teacher.exe"; Components: teacher
 Name: "{commondesktop}\Lab Monitor Teacher"; Filename: "{app}\teacher\lab-teacher.exe"; Components: teacher
-; Student shortcuts
-Name: "{group}\Lab Monitor Student"; Filename: "{app}\student\lab-student.exe"; Parameters: "--teacher 192.168.1.1"; Components: student
+; Student shortcuts (hidden from user — runs in background)
 
 [Run]
 ; Auto-start student agent after install
-Filename: "{app}\student\lab-student.exe"; Parameters: "--teacher 192.168.1.1"; Description: "Start Student Agent now"; Flags: nowait postinstall skipifsilent; Components: student
+Filename: "{app}\student\lab-student.exe"; Description: "Start Student Agent now"; Flags: nowait postinstall skipifsilent; Components: student
 
 [Registry]
-; Auto-start student agent on boot
-Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LabMonitorStudent"; ValueData: """{app}\student\lab-student.exe"" --teacher 192.168.1.1"; Flags: uninsdeletevalue; Components: student
+; Auto-start student agent on boot (no args needed — reads config.ini)
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LabMonitorStudent"; ValueData: """{app}\student\lab-student.exe"""; Flags: uninsdeletevalue; Components: student
 
 [UninstallRun]
 Filename: "taskkill"; Parameters: "/F /IM lab-student.exe"; Flags: runhidden; Components: student
@@ -71,11 +70,11 @@ var
 
 procedure InitializeWizard();
 begin
-  // Add a page to configure the teacher IP (only for student install)
   TeacherIPPage := CreateInputQueryPage(wpSelectComponents,
     'Teacher Configuration',
     'Enter the Teacher Console IP address',
-    'The student agent needs to know the IP address of the teacher console.');
+    'The student agent needs to know the IP address of the teacher computer.' + #13#10 +
+    'Ask your teacher/administrator for this address.');
   TeacherIPPage.Add('Teacher IP Address:', False);
   TeacherIPPage.Values[0] := '192.168.1.1';
 end;
@@ -83,7 +82,6 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  // Skip teacher IP page if student component is not selected
   if PageID = TeacherIPPage.ID then
     Result := not IsComponentSelected('student');
 end;
@@ -91,17 +89,24 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   TeacherIP: string;
+  ConfigFile: string;
 begin
   if CurStep = ssPostInstall then
   begin
-    TeacherIP := TeacherIPPage.Values[0];
     if IsComponentSelected('student') then
     begin
-      // Update registry with actual teacher IP
-      RegWriteStringValue(HKEY_LOCAL_MACHINE,
-        'SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
-        'LabMonitorStudent',
-        '"' + ExpandConstant('{app}') + '\student\lab-student.exe" --teacher ' + TeacherIP);
+      TeacherIP := TeacherIPPage.Values[0];
+      ConfigFile := ExpandConstant('{app}') + '\student\config.ini';
+      
+      // Write config.ini for student agent
+      SaveStringToFile(ConfigFile,
+        '[General]' + #13#10 +
+        'teacher_ip=' + TeacherIP + #13#10 +
+        'port=5400' + #13#10 +
+        'interval=2000' + #13#10 +
+        'quality=60' + #13#10 +
+        'scale=0.5' + #13#10,
+        False);
     end;
   end;
 end;
