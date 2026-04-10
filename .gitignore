@@ -1,0 +1,21 @@
+# Build
+build/
+dist/
+installer/output/
+
+# IDE
+.vscode/
+.idea/
+*.user
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Qt
+moc_*
+ui_*
+qrc_*
+*_autogen/

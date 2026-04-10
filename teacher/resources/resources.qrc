@@ -1,0 +1,18 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file>icons/refresh.svg</file>
+        <file>icons/connect.svg</file>
+        <file>icons/register.svg</file>
+        <file>icons/send_url.svg</file>
+        <file>icons/block_all.svg</file>
+        <file>icons/message.svg</file>
+        <file>icons/lock.svg</file>
+        <file>icons/unlock.svg</file>
+        <file>icons/chat.svg</file>
+        <file>icons/help.svg</file>
+        <file>icons/about.svg</file>
+        <file>icons/monitor.svg</file>
+        <file>icons/settings.svg</file>
+        <file>icons/security.svg</file>
+    </qresource>
+</RCC>

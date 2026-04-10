@@ -1,0 +1,71 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Qt6
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.7.0'
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_msvc2022_64'
+        modules: 'qtnetworkauth'
+
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release -j$env:NUMBER_OF_PROCESSORS
+
+    - name: Create distribution - Teacher
+      run: |
+        mkdir -p dist/teacher
+        cp build/teacher/Release/lab-teacher.exe dist/teacher/
+        windeployqt --release --no-translations --no-opengl-sw dist/teacher/lab-teacher.exe
+      shell: bash
+
+    - name: Create distribution - Student
+      run: |
+        mkdir -p dist/student
+        cp build/student/Release/lab-student.exe dist/student/
+        windeployqt --release --no-translations --no-opengl-sw dist/student/lab-student.exe
+      shell: bash
+
+    - name: Upload Teacher Console
+      uses: actions/upload-artifact@v4
+      with:
+        name: LabMonitor-Teacher-Windows
+        path: dist/teacher/
+        retention-days: 30
+
+    - name: Upload Student Agent
+      uses: actions/upload-artifact@v4
+      with:
+        name: LabMonitor-Student-Windows
+        path: dist/student/
+        retention-days: 30
+
+    - name: Upload Full Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: LabMonitor-Full-Windows
+        path: dist/
+        retention-days: 30
