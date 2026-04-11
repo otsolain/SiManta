@@ -1,73 +1,59 @@
-name: Build Windows Installer
+name: Build Windows
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
-env:
-  QT_VERSION: '6.7.0'
-
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    runs-on: windows-2022
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Install Qt6
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: ${{ env.QT_VERSION }}
-        host: 'windows'
-        target: 'desktop'
-        arch: 'win64_msvc2019_64'
-        cache: true
+    - name: Install aqtinstall
+      run: pip install aqtinstall==3.1.18
+
+    - name: Install Qt 6.6.3
+      run: |
+        aqt install-qt windows desktop 6.6.3 win64_msvc2019_64 --outputdir D:\Qt
+        echo "Qt6_DIR=D:\Qt\6.6.3\msvc2019_64" >> $env:GITHUB_ENV
+        echo "D:\Qt\6.6.3\msvc2019_64\bin" >> $env:GITHUB_PATH
 
     - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
 
-    - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
+    - name: Configure
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="D:\Qt\6.6.3\msvc2019_64" -G "NMake Makefiles"
 
     - name: Build
       run: cmake --build build --config Release
 
-    - name: Create Teacher distribution
+    - name: Package Teacher
       shell: bash
       run: |
         mkdir -p dist/teacher
         cp build/teacher/lab-teacher.exe dist/teacher/
+        cd dist/teacher && windeployqt.exe --release --no-translations --no-opengl-sw lab-teacher.exe
 
-    - name: Create Student distribution
+    - name: Package Student
       shell: bash
       run: |
         mkdir -p dist/student
         cp build/student/lab-student.exe dist/student/
+        cd dist/student && windeployqt.exe --release --no-translations --no-opengl-sw lab-student.exe
 
-    - name: Deploy Qt DLLs - Teacher
-      run: |
-        windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler dist/teacher/lab-teacher.exe
-
-    - name: Deploy Qt DLLs - Student
-      run: |
-        windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler dist/student/lab-student.exe
-
-    - name: Upload Teacher Console
+    - name: Upload Teacher
       uses: actions/upload-artifact@v4
       with:
         name: LabMonitor-Teacher-Windows
         path: dist/teacher/
-        retention-days: 90
 
-    - name: Upload Student Agent
+    - name: Upload Student
       uses: actions/upload-artifact@v4
       with:
         name: LabMonitor-Student-Windows
         path: dist/student/
-        retention-days: 90
