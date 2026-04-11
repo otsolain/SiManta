@@ -12,14 +12,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
     - name: Install aqtinstall
       run: pip install aqtinstall==3.1.18
 
+    - name: List available architectures
+      run: python -m aqt list-qt windows desktop --arch 6.6.3
+
     - name: Install Qt 6.6.3
-      run: |
-        aqt install-qt windows desktop 6.6.3 win64_msvc2019_64 --outputdir D:\Qt
-        echo "Qt6_DIR=D:\Qt\6.6.3\msvc2019_64" >> $env:GITHUB_ENV
-        echo "D:\Qt\6.6.3\msvc2019_64\bin" >> $env:GITHUB_PATH
+      run: python -m aqt install-qt windows desktop 6.6.3 win64_msvc2019_64 --outputdir D:\Qt
 
     - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
@@ -27,24 +32,28 @@ jobs:
         arch: x64
 
     - name: Configure
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="D:\Qt\6.6.3\msvc2019_64" -G "NMake Makefiles"
+      run: |
+        $env:PATH = "D:\Qt\6.6.3\msvc2019_64\bin;$env:PATH"
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="D:\Qt\6.6.3\msvc2019_64" -G "NMake Makefiles"
 
     - name: Build
-      run: cmake --build build --config Release
+      run: |
+        $env:PATH = "D:\Qt\6.6.3\msvc2019_64\bin;$env:PATH"
+        cmake --build build --config Release
 
     - name: Package Teacher
-      shell: bash
       run: |
-        mkdir -p dist/teacher
-        cp build/teacher/lab-teacher.exe dist/teacher/
-        cd dist/teacher && windeployqt.exe --release --no-translations --no-opengl-sw lab-teacher.exe
+        $env:PATH = "D:\Qt\6.6.3\msvc2019_64\bin;$env:PATH"
+        New-Item -ItemType Directory -Force -Path dist\teacher
+        Copy-Item build\teacher\lab-teacher.exe dist\teacher\
+        windeployqt --release --no-translations --no-opengl-sw dist\teacher\lab-teacher.exe
 
     - name: Package Student
-      shell: bash
       run: |
-        mkdir -p dist/student
-        cp build/student/lab-student.exe dist/student/
-        cd dist/student && windeployqt.exe --release --no-translations --no-opengl-sw lab-student.exe
+        $env:PATH = "D:\Qt\6.6.3\msvc2019_64\bin;$env:PATH"
+        New-Item -ItemType Directory -Force -Path dist\student
+        Copy-Item build\student\lab-student.exe dist\student\
+        windeployqt --release --no-translations --no-opengl-sw dist\student\lab-student.exe
 
     - name: Upload Teacher
       uses: actions/upload-artifact@v4
