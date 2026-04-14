@@ -1,112 +1,215 @@
-; Lab Monitor Installer - InnoSetup Script
-; Builds a Windows installer with Teacher/Student component selection
-;
-; Prerequisites:
-;   - Build lab-teacher.exe and lab-student.exe with Qt6 on Windows
-;   - Run windeployqt on both executables
-;   - Place everything in the dist/ folder structure below
-;
-; Build: iscc installer.iss
 
-#define AppName "Lab Monitor"
-#define AppVersion "1.0.0"
-#define AppPublisher "Lab Monitor"
-#define AppURL "https://github.com/labmonitor"
+#define MyAppName "SiManta"
+#define MyAppVersion "1.0.0"
+#define MyAppPublisher "SiManta"
+#define MyAppURL "https://simanta.id"
+#define MyAppCopyright "(c) 2026 SiManta. All rights reserved."
 
 [Setup]
-AppId={{B5F6E3A2-8C4D-4E9F-A1B3-7D2F5E6C8A9B}
-AppName={#AppName}
-AppVersion={#AppVersion}
-AppPublisher={#AppPublisher}
-AppSupportURL={#AppURL}
-DefaultDirName={autopf}\{#AppName}
-DefaultGroupName={#AppName}
+AppId={{A7D3C4E1-B2F5-4A89-8C6D-3E7F1A2B9D0C}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppCopyright={#MyAppCopyright}
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-OutputDir=output
-OutputBaseFilename=LabMonitor-Setup-{#AppVersion}
+OutputDir=..\dist\installer
+OutputBaseFilename=SiManta-Setup-{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
-WizardStyle=modern
-PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+SetupIconFile=logo.ico
+WizardStyle=modern
+WizardSizePercent=110,110
+DisableWelcomePage=no
+LicenseFile=license.txt
+PrivilegesRequired=admin
+UninstallDisplayName={#MyAppName}
+UninstallDisplayIcon={app}\logo.ico
+VersionInfoVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Classroom Management Installer
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
 
-[Types]
-Name: "teacher"; Description: "Teacher Console - Monitor and control student computers"
-Name: "student"; Description: "Student Agent - Runs on student computers"
-Name: "full"; Description: "Full Installation (Teacher + Student)"
-
-[Components]
-Name: "teacher"; Description: "Teacher Console"; Types: teacher full
-Name: "student"; Description: "Student Agent"; Types: student full
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-; Teacher files
-Source: "dist\teacher\*"; DestDir: "{app}\teacher"; Flags: ignoreversion recursesubdirs; Components: teacher
-; Student files
-Source: "dist\student\*"; DestDir: "{app}\student"; Flags: ignoreversion recursesubdirs; Components: student
+Source: "..\dist\teacher\*"; DestDir: "{app}\Teacher"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsTeacherInstall
+Source: "..\dist\student\*"; DestDir: "{app}\Student"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsStudentInstall
+Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-; Teacher shortcuts
-Name: "{group}\Lab Monitor Teacher"; Filename: "{app}\teacher\lab-teacher.exe"; Components: teacher
-Name: "{commondesktop}\Lab Monitor Teacher"; Filename: "{app}\teacher\lab-teacher.exe"; Components: teacher
-; Student shortcuts (hidden from user — runs in background)
+Name: "{group}\SiManta - Teacher Console"; Filename: "{app}\Teacher\SiMantaTeacher.exe"; Check: IsTeacherInstall; Comment: "Launch Teacher Console"; IconFilename: "{app}\logo.ico"
+Name: "{autodesktop}\SiManta - Teacher"; Filename: "{app}\Teacher\SiMantaTeacher.exe"; Check: IsTeacherInstall; Comment: "SiManta Teacher Console"
 
-[Run]
-; Auto-start student agent after install
-Filename: "{app}\student\lab-student.exe"; Description: "Start Student Agent now"; Flags: nowait postinstall skipifsilent; Components: student
+Name: "{group}\SiManta - Student Agent"; Filename: "{app}\Student\SiMantaStudent.exe"; Check: IsStudentInstall; Comment: "Launch Student Agent"
+
+Name: "{group}\Uninstall SiManta"; Filename: "{uninstallexe}"
 
 [Registry]
-; Auto-start student agent on boot (no args needed — reads config.ini)
-Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "LabMonitorStudent"; ValueData: """{app}\student\lab-student.exe"""; Flags: uninsdeletevalue; Components: student
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SiMantaStudent"; ValueData: """{app}\Student\SiMantaStudent.exe"""; Check: IsStudentInstall; Flags: uninsdeletevalue
+
+[Run]
+Filename: "{app}\Teacher\SiMantaTeacher.exe"; Description: "Launch Teacher Console now"; Check: IsTeacherInstall; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\Student\SiMantaStudent.exe"; Description: "Launch Student Agent now"; Check: IsStudentInstall; Flags: nowait postinstall skipifsilent unchecked
+
+[Run]
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Teacher"" dir=in action=allow program=""{app}\Teacher\SiMantaTeacher.exe"" enable=yes profile=any protocol=tcp"; Check: IsTeacherInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Student"" dir=in action=allow program=""{app}\Student\SiMantaStudent.exe"" enable=yes profile=any protocol=tcp"; Check: IsStudentInstall; Flags: runhidden
 
 [UninstallRun]
-Filename: "taskkill"; Parameters: "/F /IM lab-student.exe"; Flags: runhidden; Components: student
-Filename: "taskkill"; Parameters: "/F /IM lab-teacher.exe"; Flags: runhidden; Components: teacher
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Teacher"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Student"""; Flags: runhidden
+Filename: "taskkill"; Parameters: "/f /im SiMantaTeacher.exe"; Flags: runhidden
+Filename: "taskkill"; Parameters: "/f /im SiMantaStudent.exe"; Flags: runhidden
 
 [Code]
 var
+  RolePage: TWizardPage;
+  TeacherRadio: TRadioButton;
+  StudentRadio: TRadioButton;
   TeacherIPPage: TInputQueryWizardPage;
+  RoleSelected: Integer; // 0 = teacher, 1 = student
+
+function IsTeacherInstall(): Boolean;
+begin
+  Result := (RoleSelected = 0);
+end;
+
+function IsStudentInstall(): Boolean;
+begin
+  Result := (RoleSelected = 1);
+end;
 
 procedure InitializeWizard();
+var
+  HeaderLabel: TLabel;
+  DescLabel: TLabel;
+  TeacherDesc: TLabel;
+  StudentDesc: TLabel;
 begin
-  TeacherIPPage := CreateInputQueryPage(wpSelectComponents,
+  RoleSelected := 0; // Default: Teacher
+
+  // ---- Custom Role Selection Page (Radio Buttons) ----
+  RolePage := CreateCustomPage(wpLicense,
+    'Installation Type',
+    'Choose how you want to install SiManta on this computer.');
+
+  // Header
+  HeaderLabel := TLabel.Create(RolePage);
+  HeaderLabel.Parent := RolePage.Surface;
+  HeaderLabel.Caption := 'Select Installation Mode:';
+  HeaderLabel.Font.Size := 11;
+  HeaderLabel.Font.Style := [fsBold];
+  HeaderLabel.Left := 0;
+  HeaderLabel.Top := 16;
+  HeaderLabel.Width := RolePage.SurfaceWidth;
+
+  // --- Teacher Radio ---
+  TeacherRadio := TRadioButton.Create(RolePage);
+  TeacherRadio.Parent := RolePage.Surface;
+  TeacherRadio.Caption := 'Install as Teacher (Guru)';
+  TeacherRadio.Font.Size := 10;
+  TeacherRadio.Font.Style := [fsBold];
+  TeacherRadio.Left := 16;
+  TeacherRadio.Top := 60;
+  TeacherRadio.Width := RolePage.SurfaceWidth - 32;
+  TeacherRadio.Height := 24;
+  TeacherRadio.Checked := True;
+
+  TeacherDesc := TLabel.Create(RolePage);
+  TeacherDesc.Parent := RolePage.Surface;
+  TeacherDesc.Caption := 'Installs the Teacher Console to monitor and control student screens in real-time. Use this on the teacher''s computer.';
+  TeacherDesc.WordWrap := True;
+  TeacherDesc.Left := 36;
+  TeacherDesc.Top := 88;
+  TeacherDesc.Width := RolePage.SurfaceWidth - 52;
+  TeacherDesc.Font.Color := clGray;
+
+  // --- Student Radio ---
+  StudentRadio := TRadioButton.Create(RolePage);
+  StudentRadio.Parent := RolePage.Surface;
+  StudentRadio.Caption := 'Install as Student (Murid)';
+  StudentRadio.Font.Size := 10;
+  StudentRadio.Font.Style := [fsBold];
+  StudentRadio.Left := 16;
+  StudentRadio.Top := 140;
+  StudentRadio.Width := RolePage.SurfaceWidth - 32;
+  StudentRadio.Height := 24;
+
+  StudentDesc := TLabel.Create(RolePage);
+  StudentDesc.Parent := RolePage.Surface;
+  StudentDesc.Caption := 'Installs the Student Agent that runs silently in the background. Captures the screen and sends it to the Teacher Console. Use this on each student''s computer.';
+  StudentDesc.WordWrap := True;
+  StudentDesc.Left := 36;
+  StudentDesc.Top := 168;
+  StudentDesc.Width := RolePage.SurfaceWidth - 52;
+  StudentDesc.Font.Color := clGray;
+
+  // Description
+  DescLabel := TLabel.Create(RolePage);
+  DescLabel.Parent := RolePage.Surface;
+  DescLabel.Caption := 'Note: Only one mode can be installed per computer.';
+  DescLabel.Font.Style := [fsItalic];
+  DescLabel.Font.Color := clGray;
+  DescLabel.Left := 0;
+  DescLabel.Top := 230;
+  DescLabel.Width := RolePage.SurfaceWidth;
+
+  // ---- Teacher IP Configuration Page (Student only) ----
+  TeacherIPPage := CreateInputQueryPage(RolePage.ID,
     'Teacher Configuration',
-    'Enter the Teacher Console IP address',
-    'The student agent needs to know the IP address of the teacher computer.' + #13#10 +
-    'Ask your teacher/administrator for this address.');
+    'Configure the Teacher Console IP address for the Student Agent.',
+    'Enter the IP address of the teacher''s computer. ' +
+    'The Student Agent will automatically connect to this IP on startup. ' +
+    'You can change this later in config.ini.');
   TeacherIPPage.Add('Teacher IP Address:', False);
-  TeacherIPPage.Values[0] := '192.168.1.1';
+  TeacherIPPage.Values[0] := '127.0.0.1';
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+
+  // Save the radio selection when leaving the role page
+  if CurPageID = RolePage.ID then
+  begin
+    if TeacherRadio.Checked then
+      RoleSelected := 0
+    else
+      RoleSelected := 1;
+  end;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
+  // Skip Teacher IP page if installing as Teacher
   if PageID = TeacherIPPage.ID then
-    Result := not IsComponentSelected('student');
+    Result := IsTeacherInstall();
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  TeacherIP: string;
   ConfigFile: string;
 begin
   if CurStep = ssPostInstall then
   begin
-    if IsComponentSelected('student') then
+    // Write config.ini for Student Agent with the teacher IP
+    if IsStudentInstall() then
     begin
-      TeacherIP := TeacherIPPage.Values[0];
-      ConfigFile := ExpandConstant('{app}') + '\student\config.ini';
-      
-      // Write config.ini for student agent
-      SaveStringToFile(ConfigFile,
-        '[General]' + #13#10 +
-        'teacher_ip=' + TeacherIP + #13#10 +
-        'port=5400' + #13#10 +
-        'interval=2000' + #13#10 +
-        'quality=60' + #13#10 +
-        'scale=0.5' + #13#10,
-        False);
+      ConfigFile := ExpandConstant('{app}\Student\config.ini');
+      SetIniString('General', 'teacher_ip', TeacherIPPage.Values[0], ConfigFile);
+      SetIniString('General', 'port', '5400', ConfigFile);
+      SetIniString('General', 'interval', '2000', ConfigFile);
+      SetIniString('General', 'quality', '92', ConfigFile);
+      SetIniString('General', 'scale', '1.0', ConfigFile);
     end;
   end;
 end;

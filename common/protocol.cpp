@@ -4,9 +4,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSysInfo>
-#include <QProcess>
 #include <QHostInfo>
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QScreen>
 
 namespace LabMonitor {
 
@@ -21,7 +22,7 @@ QByteArray serializeHeader(MsgType type, uint32_t payloadLength)
     stream << static_cast<uint16_t>(MAGIC_BYTES);
     stream << static_cast<uint16_t>(static_cast<uint8_t>(type));
     stream << payloadLength;
-    stream << static_cast<uint32_t>(0); // reserved
+    stream << static_cast<uint32_t>(0);
 
     return data;
 }
@@ -103,10 +104,9 @@ QString getLocalHostname()
 
 QString getLocalUsername()
 {
-    // Try environment variables
-    QString user = qEnvironmentVariable("USER");
+    QString user = qEnvironmentVariable("USERNAME");
     if (user.isEmpty()) {
-        user = qEnvironmentVariable("USERNAME");
+        user = qEnvironmentVariable("USER");
     }
     if (user.isEmpty()) {
         user = "unknown";
@@ -121,17 +121,12 @@ QString getOsString()
 
 QString getScreenResolution()
 {
-    // Will be called from student agent where we can detect this
-    // Default placeholder — overridden by actual detection
-    QProcess proc;
-    proc.start("sh", QStringList() << "-c" << "xdpyinfo 2>/dev/null | grep dimensions | awk '{print $2}' || wlr-randr 2>/dev/null | grep current | head -1 | awk '{print $1}' || echo '1920x1080'");
-    proc.waitForFinished(2000);
-    QString result = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
-    if (result.isEmpty()) {
-        return "1920x1080";
+    QScreen* screen = QGuiApplication::primaryScreen();
+    if (screen) {
+        QSize size = screen->size();
+        return QStringLiteral("%1x%2").arg(size.width()).arg(size.height());
     }
-    // Take only the first line
-    return result.split('\n').first().trimmed();
+    return QStringLiteral("1920x1080");
 }
 
 QByteArray createMessagePayload(const QString& title, const QString& body,
@@ -222,4 +217,42 @@ bool parseHelpPayload(const QByteArray& data, HelpData& help)
     return true;
 }
 
-} // namespace LabMonitor
+QByteArray createFileStartPayload(const QString& fileName, qint64 fileSize, bool isFolder)
+{
+    QJsonObject obj;
+    obj["fileName"]  = fileName;
+    obj["fileSize"]  = fileSize;
+    obj["isFolder"]  = isFolder;
+    obj["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact);
+}
+
+bool parseFileStartPayload(const QByteArray& data, FileStartData& fsd)
+{
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &error);
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    QJsonObject obj = doc.object();
+    fsd.fileName = obj.value("fileName").toString();
+    fsd.fileSize = obj.value("fileSize").toVariant().toLongLong();
+    fsd.isFolder = obj.value("isFolder").toBool(false);
+    return !fsd.fileName.isEmpty();
+}
+
+QByteArray createFileEndPayload(const QString& fileName)
+{
+    QJsonObject obj;
+    obj["fileName"]  = fileName;
+    obj["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact);
+}
+
+QString parseFileEndPayload(const QByteArray& data)
+{
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &error);
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) return {};
+    return doc.object().value("fileName").toString();
+}
+
+}

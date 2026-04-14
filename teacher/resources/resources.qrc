@@ -14,5 +14,6 @@
         <file>icons/monitor.svg</file>
         <file>icons/settings.svg</file>
         <file>icons/security.svg</file>
+        <file>icons/logo.ico</file>
     </qresource>
 </RCC>

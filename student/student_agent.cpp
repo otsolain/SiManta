@@ -3,13 +3,18 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QBuffer>
+#include <QImage>
+#include <QDir>
+#include <QStandardPaths>
+#include <QProcess>
 
-#ifdef Q_OS_WIN
 #include <windows.h>
 #include <psapi.h>
-#endif
+#include <shellapi.h>
 
 namespace LabMonitor {
+static constexpr qint64 MAX_BUFFER_SIZE = 20 * 1024 * 1024;
 
 StudentAgent::StudentAgent(QObject* parent)
     : QObject(parent)
@@ -19,7 +24,6 @@ StudentAgent::StudentAgent(QObject* parent)
     , m_pingTimer(new QTimer(this))
     , m_reconnectTimer(new QTimer(this))
 {
-    // Socket signals
     connect(m_socket, &QTcpSocket::connected,
             this, &StudentAgent::onConnected);
     connect(m_socket, &QTcpSocket::disconnected,
@@ -28,23 +32,15 @@ StudentAgent::StudentAgent(QObject* parent)
             this, &StudentAgent::onSocketError);
     connect(m_socket, &QTcpSocket::readyRead,
             this, &StudentAgent::onReadyRead);
-
-    // Capture timer
     m_captureTimer->setTimerType(Qt::PreciseTimer);
     connect(m_captureTimer, &QTimer::timeout,
             this, &StudentAgent::captureAndSend);
-
-    // Ping timer
     m_pingTimer->setInterval(PING_INTERVAL_MS);
     connect(m_pingTimer, &QTimer::timeout,
             this, &StudentAgent::sendPing);
-
-    // Reconnect timer (single shot)
     m_reconnectTimer->setSingleShot(true);
     connect(m_reconnectTimer, &QTimer::timeout,
             this, &StudentAgent::attemptReconnect);
-
-    // Capturer error
     connect(m_capturer, &ScreenCapturer::captureError,
             this, [this](const QString& err) {
         qWarning() << "[StudentAgent] Capture error:" << err;
@@ -75,12 +71,6 @@ void StudentAgent::start()
     qInfo() << "[StudentAgent] Capture interval:" << m_captureInterval << "ms";
     qInfo() << "[StudentAgent] JPEG quality:" << m_capturer->quality();
     qInfo() << "[StudentAgent] Scale:" << m_capturer->scale();
-
-    if (!ScreenCapturer::isGrimAvailable()) {
-        qCritical() << "[StudentAgent] grim is not installed! Cannot capture screen.";
-        emit error("grim is not installed");
-        return;
-    }
 
     m_running = true;
     m_captureTimer->setInterval(m_captureInterval);
@@ -125,8 +115,6 @@ void StudentAgent::onConnected()
     resetReconnectBackoff();
 
     sendHello();
-
-    // Start capture and ping timers
     m_captureTimer->start();
     m_pingTimer->start();
 
@@ -142,13 +130,9 @@ void StudentAgent::onDisconnected()
     m_pingTimer->stop();
 
     emit disconnected();
-
-    // Schedule reconnect
-    if (m_running) {
+    if (m_running && !m_reconnectTimer->isActive()) {
         qInfo() << "[StudentAgent] Reconnecting in" << m_reconnectDelay << "ms";
         m_reconnectTimer->start(m_reconnectDelay);
-
-        // Exponential backoff
         m_reconnectDelay = qMin(m_reconnectDelay * 2, m_maxReconnectDelay);
     }
 }
@@ -159,9 +143,7 @@ void StudentAgent::onSocketError(QAbstractSocket::SocketError err)
     if (m_connected) {
         qWarning() << "[StudentAgent] Socket error:" << m_socket->errorString();
     }
-
-    // If not connected yet, trigger reconnect
-    if (!m_connected && m_running) {
+    if (!m_connected && m_running && !m_reconnectTimer->isActive()) {
         qInfo() << "[StudentAgent] Connection failed, retrying in" << m_reconnectDelay << "ms";
         m_reconnectTimer->start(m_reconnectDelay);
         m_reconnectDelay = qMin(m_reconnectDelay * 2, m_maxReconnectDelay);
@@ -171,6 +153,12 @@ void StudentAgent::onSocketError(QAbstractSocket::SocketError err)
 void StudentAgent::onReadyRead()
 {
     m_readBuffer.append(m_socket->readAll());
+    if (m_readBuffer.size() > MAX_BUFFER_SIZE) {
+        qWarning() << "[StudentAgent] Buffer exceeded limit, clearing";
+        m_readBuffer.clear();
+        return;
+    }
+
     processIncomingData();
 }
 
@@ -183,34 +171,26 @@ void StudentAgent::processIncomingData()
             m_readBuffer.clear();
             return;
         }
-
-        int totalSize = HEADER_SIZE + static_cast<int>(header.payloadLength);
+        qint64 totalSize = static_cast<qint64>(HEADER_SIZE) + static_cast<qint64>(header.payloadLength);
         if (m_readBuffer.size() < totalSize) {
-            // Need more data
             return;
         }
-
-        // Extract payload
         QByteArray payload = m_readBuffer.mid(HEADER_SIZE, static_cast<int>(header.payloadLength));
-        m_readBuffer.remove(0, totalSize);
+        m_readBuffer.remove(0, static_cast<int>(totalSize));
 
         MsgType type = static_cast<MsgType>(header.msgType & 0xFF);
 
         switch (type) {
         case MsgType::ACK:
-            // Teacher acknowledged
             break;
         case MsgType::PING:
-            // Respond with PONG
             if (m_socket->state() == QAbstractSocket::ConnectedState) {
                 m_socket->write(createPacket(MsgType::PONG));
             }
             break;
         case MsgType::PONG:
-            // Keepalive response received
             break;
         case MsgType::CMD:
-            // Future: handle commands
             qInfo() << "[StudentAgent] Received CMD (not yet implemented)";
             break;
         case MsgType::MESSAGE: {
@@ -247,6 +227,15 @@ void StudentAgent::processIncomingData()
             }
             break;
         }
+        case MsgType::TRANSFER_START:
+            handleFileStart(payload);
+            break;
+        case MsgType::TRANSFER_CHUNK:
+            handleFileChunk(payload);
+            break;
+        case MsgType::TRANSFER_END:
+            handleFileEnd(payload);
+            break;
         default:
             qWarning() << "[StudentAgent] Unknown message type:" << header.msgType;
             break;
@@ -290,8 +279,6 @@ void StudentAgent::captureAndSend()
     if (written > 0) {
         emit frameSent(static_cast<int>(written));
     }
-
-    // Also send active app status
     sendAppStatus();
 }
 
@@ -301,17 +288,12 @@ void StudentAgent::sendAppStatus()
 
     QString appName;
     QString appClass;
-
-#ifdef Q_OS_WIN
-    // Windows: use Win32 API
+    QString exeFullPath;
     HWND hwnd = GetForegroundWindow();
     if (hwnd) {
-        // Get window title
         wchar_t title[256];
         GetWindowTextW(hwnd, title, 256);
         appName = QString::fromWCharArray(title);
-
-        // Get process name as "class"
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         if (pid) {
@@ -320,44 +302,15 @@ void StudentAgent::sendAppStatus()
                 wchar_t exePath[MAX_PATH];
                 DWORD size = MAX_PATH;
                 if (QueryFullProcessImageNameW(hProc, 0, exePath, &size)) {
-                    QString path = QString::fromWCharArray(exePath);
-                    appClass = QFileInfo(path).baseName(); // e.g. "firefox", "chrome"
+                    exeFullPath = QString::fromWCharArray(exePath);
+                    appClass = QFileInfo(exeFullPath).baseName();
                 }
                 CloseHandle(hProc);
             }
         }
     }
-#else
-    // Linux: use hyprctl (Hyprland) or fallback
-    QProcess proc;
-    proc.start("hyprctl", QStringList() << "activewindow" << "-j");
-    proc.waitForFinished(500);
-
-    if (proc.exitCode() == 0) {
-        QByteArray output = proc.readAllStandardOutput();
-        QJsonDocument doc = QJsonDocument::fromJson(output);
-        if (doc.isObject()) {
-            QJsonObject obj = doc.object();
-            appName = obj.value("title").toString();
-            appClass = obj.value("class").toString();
-        }
-    }
-
-    if (appClass.isEmpty()) {
-        // Fallback: try xdotool
-        QProcess proc2;
-        proc2.start("sh", QStringList() << "-c"
-            << "xdotool getactivewindow getwindowname 2>/dev/null");
-        proc2.waitForFinished(500);
-        if (proc2.exitCode() == 0) {
-            appName = QString::fromUtf8(proc2.readAllStandardOutput()).trimmed();
-        }
-    }
-#endif
 
     if (appName.isEmpty() && appClass.isEmpty()) return;
-
-    // Truncate long titles
     if (appName.length() > 80) {
         appName = appName.left(77) + "...";
     }
@@ -365,6 +318,61 @@ void StudentAgent::sendAppStatus()
     QJsonObject obj;
     obj["app"]      = appName;
     obj["class"]    = appClass;
+    obj["cpuUsage"] = getCpuUsage();
+    obj["ramUsage"] = getRamUsage();
+    static QString s_lastExePath;
+    static QString s_cachedIconB64;
+
+    if (!exeFullPath.isEmpty() && exeFullPath != s_lastExePath) {
+        s_cachedIconB64.clear();
+        s_lastExePath = exeFullPath;
+        HICON hIconSmall = nullptr;
+        ExtractIconExW(reinterpret_cast<const wchar_t*>(exeFullPath.utf16()), 0, nullptr, &hIconSmall, 1);
+        if (hIconSmall) {
+            ICONINFO iconInfo = {};
+            if (GetIconInfo(hIconSmall, &iconInfo)) {
+                BITMAP bm = {};
+                GetObject(iconInfo.hbmColor, sizeof(bm), &bm);
+                int w = bm.bmWidth;
+                int h = bm.bmHeight;
+
+                if (w > 0 && h > 0 && w <= 256 && h <= 256) {
+                    HDC hDC = GetDC(nullptr);
+                    HDC hMemDC = CreateCompatibleDC(hDC);
+
+                    BITMAPINFOHEADER bi = {};
+                    bi.biSize = sizeof(BITMAPINFOHEADER);
+                    bi.biWidth = w;
+                    bi.biHeight = -h;
+                    bi.biPlanes = 1;
+                    bi.biBitCount = 32;
+                    bi.biCompression = BI_RGB;
+
+                    QImage img(w, h, QImage::Format_ARGB32);
+                    HGDIOBJ hOld = SelectObject(hMemDC, iconInfo.hbmColor);
+                    GetDIBits(hMemDC, iconInfo.hbmColor, 0, h, img.bits(),
+                              reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS);
+                    SelectObject(hMemDC, hOld);
+
+                    DeleteDC(hMemDC);
+                    ReleaseDC(nullptr, hDC);
+                    QByteArray pngData;
+                    QBuffer pngBuf(&pngData);
+                    pngBuf.open(QIODevice::WriteOnly);
+                    img.save(&pngBuf, "PNG");
+                    s_cachedIconB64 = QString::fromLatin1(pngData.toBase64());
+                }
+
+                if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+                if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+            }
+            DestroyIcon(hIconSmall);
+        }
+    }
+
+    if (!s_cachedIconB64.isEmpty()) {
+        obj["icon"] = s_cachedIconB64;
+    }
 
     QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact);
     QByteArray packet = createPacket(MsgType::APP_STATUS, payload);
@@ -420,4 +428,150 @@ void StudentAgent::sendHelpRequest(const QString& message)
     qInfo() << "[StudentAgent] Sent help request";
 }
 
-} // namespace LabMonitor
+void StudentAgent::handleFileStart(const QByteArray& payload)
+{
+    FileStartData fsd;
+    if (!parseFileStartPayload(payload, fsd)) {
+        qWarning() << "[StudentAgent] Failed to parse FILE_START";
+        return;
+    }
+    QString downloadsDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    QString siMantaDir = downloadsDir + "/SiManta";
+    QDir().mkpath(siMantaDir);
+
+    QString filePath = siMantaDir + "/" + fsd.fileName;
+    if (m_incomingFile) {
+        m_incomingFile->close();
+        delete m_incomingFile;
+        m_incomingFile = nullptr;
+    }
+
+    m_incomingFile = new QFile(filePath, this);
+    if (!m_incomingFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning() << "[StudentAgent] Cannot open file for writing:" << filePath;
+        delete m_incomingFile;
+        m_incomingFile = nullptr;
+        return;
+    }
+
+    m_incomingFileName = fsd.fileName;
+    m_incomingFileSize = fsd.fileSize;
+    m_incomingReceived = 0;
+    m_incomingIsFolder = fsd.isFolder;
+
+    qInfo() << "[StudentAgent] Receiving file:" << fsd.fileName
+             << "size:" << fsd.fileSize << "isFolder:" << fsd.isFolder;
+
+    emit fileReceiveStarted(fsd.fileName, fsd.fileSize, fsd.isFolder);
+}
+
+void StudentAgent::handleFileChunk(const QByteArray& payload)
+{
+    if (!m_incomingFile || !m_incomingFile->isOpen()) {
+        qWarning() << "[StudentAgent] FILE_CHUNK but no active transfer";
+        return;
+    }
+
+    m_incomingFile->write(payload);
+    m_incomingReceived += payload.size();
+    if (m_incomingFileSize > 0) {
+        int percent = static_cast<int>((m_incomingReceived * 100) / m_incomingFileSize);
+        emit fileReceiveProgress(m_incomingFileName, qBound(0, percent, 100));
+    }
+}
+
+void StudentAgent::handleFileEnd(const QByteArray& payload)
+{
+    Q_UNUSED(payload)
+
+    if (!m_incomingFile || !m_incomingFile->isOpen()) {
+        qWarning() << "[StudentAgent] FILE_END but no active transfer";
+        return;
+    }
+
+    QString filePath = m_incomingFile->fileName();
+    m_incomingFile->close();
+    delete m_incomingFile;
+    m_incomingFile = nullptr;
+
+    qInfo() << "[StudentAgent] File received:" << filePath
+             << "(" << m_incomingReceived << "bytes)";
+
+    QString savePath = filePath;
+    bool wasFolder = m_incomingIsFolder;
+    if (m_incomingIsFolder && filePath.endsWith(".zip", Qt::CaseInsensitive)) {
+        QString extractDir = filePath;
+        extractDir.chop(4);
+        QDir().mkpath(extractDir);
+        QProcess* proc = new QProcess(this);
+        QString fName = m_incomingFileName;
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, proc, filePath, extractDir, fName](int exitCode, QProcess::ExitStatus) {
+            if (exitCode == 0) {
+                QFile::remove(filePath);
+                qInfo() << "[StudentAgent] Folder extracted to:" << extractDir;
+            } else {
+                qWarning() << "[StudentAgent] Extract failed, exit code:" << exitCode;
+            }
+            proc->deleteLater();
+            emit fileReceiveCompleted(fName, extractDir, true);
+        });
+
+        proc->start("powershell", QStringList()
+            << "-NoProfile" << "-Command"
+            << QStringLiteral("Expand-Archive -Path '%1' -DestinationPath '%2' -Force")
+               .arg(filePath, extractDir));
+    } else {
+        emit fileReceiveCompleted(m_incomingFileName, savePath, false);
+    }
+}
+
+double StudentAgent::getCpuUsage()
+{
+    FILETIME idleTime, kernelTime, userTime;
+    if (!GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+        return -1.0;
+    }
+
+    auto toU64 = [](const FILETIME& ft) -> quint64 {
+        return (static_cast<quint64>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    };
+
+    quint64 idle   = toU64(idleTime);
+    quint64 kernel = toU64(kernelTime);
+    quint64 user   = toU64(userTime);
+
+    if (!m_cpuInitialized) {
+        m_lastCpuIdle   = idle;
+        m_lastCpuKernel = kernel;
+        m_lastCpuUser   = user;
+        m_cpuInitialized = true;
+        return 0.0;
+    }
+
+    quint64 dIdle   = idle   - m_lastCpuIdle;
+    quint64 dKernel = kernel - m_lastCpuKernel;
+    quint64 dUser   = user   - m_lastCpuUser;
+
+    m_lastCpuIdle   = idle;
+    m_lastCpuKernel = kernel;
+    m_lastCpuUser   = user;
+
+    quint64 total = dKernel + dUser;
+    if (total == 0) return 0.0;
+
+    double usage = (1.0 - (static_cast<double>(dIdle) / static_cast<double>(total))) * 100.0;
+    return qBound(0.0, usage, 100.0);
+}
+
+double StudentAgent::getRamUsage()
+{
+    MEMORYSTATUSEX memInfo;
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+    if (!GlobalMemoryStatusEx(&memInfo)) {
+        return -1.0;
+    }
+    return static_cast<double>(memInfo.dwMemoryLoad);
+}
+
+}

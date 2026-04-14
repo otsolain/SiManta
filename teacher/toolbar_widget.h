@@ -9,11 +9,6 @@
 
 namespace LabMonitor {
 
-/**
- * ToolbarWidget — Custom ribbon-style toolbar matching NetSupport School's look.
- * 
- * Buttons grouped by function with vertical separators, SVG icons above text labels.
- */
 class ToolbarWidget : public QWidget
 {
     Q_OBJECT
@@ -32,6 +27,8 @@ signals:
     void unlockClicked();
     void chatClicked();
     void helpRequestsClicked();
+    void sendFileClicked();
+    void sendFolderClicked();
     void aboutClicked();
 
 private:
@@ -42,4 +39,4 @@ private:
     QHBoxLayout* m_layout;
 };
 
-} // namespace LabMonitor
+}

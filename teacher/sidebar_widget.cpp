@@ -12,11 +12,11 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(true);
     setStyleSheet(Styles::sidebarStyle());
-    setFixedWidth(48);
+    setFixedWidth(50);
 
     m_layout = new QVBoxLayout(this);
-    m_layout->setContentsMargins(0, 4, 0, 4);
-    m_layout->setSpacing(0);
+    m_layout->setContentsMargins(0, 6, 0, 6);
+    m_layout->setSpacing(2);
 
     m_buttonGroup = new QButtonGroup(this);
     m_buttonGroup->setExclusive(true);
@@ -36,8 +36,6 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     m_layout->addWidget(btnSecurity);
     m_layout->addWidget(btnSettings);
     m_layout->addStretch();
-
-    // Default: Monitor view active
     btnMonitor->setChecked(true);
 
     connect(m_buttonGroup, &QButtonGroup::idClicked,
@@ -53,8 +51,8 @@ QPushButton* SidebarWidget::createSidebarButton(const QString& iconPath, const Q
     btn->setIconSize(QSize(22, 22));
     btn->setToolTip(tooltip);
     btn->setCursor(Qt::PointingHandCursor);
-    btn->setFixedSize(48, 44);
+    btn->setFixedSize(50, 46);
     return btn;
 }
 
-} // namespace LabMonitor
+}

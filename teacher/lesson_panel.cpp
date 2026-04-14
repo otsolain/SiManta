@@ -7,8 +7,6 @@
 #include <QMouseEvent>
 
 namespace LabMonitor {
-
-// Helper: clickable header widget
 class ClickableWidget : public QWidget
 {
 public:
@@ -34,26 +32,26 @@ void LessonPanel::setupUi()
     auto* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
-
-    // ── Header ──
     auto* header = new ClickableWidget(this);
     header->setObjectName("LessonHeader");
     header->setAttribute(Qt::WA_StyledBackground, true);
     header->setAutoFillBackground(true);
     header->setStyleSheet(Styles::lessonHeaderStyle());
     header->setCursor(Qt::PointingHandCursor);
-    header->setFixedHeight(30);
+    header->setFixedHeight(32);
     m_header = header;
 
     auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(12, 4, 12, 4);
+    headerLayout->setContentsMargins(14, 4, 14, 4);
     headerLayout->setSpacing(8);
 
-    m_headerIcon = new QLabel("⚙", header);
-    m_headerIcon->setStyleSheet("font-size: 12pt; background: transparent; border: none;");
+    m_headerIcon = new QLabel(header);
+    m_headerIcon->setStyleSheet("font-size: 11pt; background: transparent; border: none;");
     m_headerLabel = new QLabel("Lesson Details", header);
-    m_collapseIndicator = new QLabel("▼", header);
-    m_collapseIndicator->setStyleSheet("font-size: 8pt; background: transparent; border: none; color: white;");
+    m_collapseIndicator = new QLabel("v", header);
+    m_collapseIndicator->setStyleSheet(
+        QStringLiteral("font-size: 8pt; background: transparent; border: none; color: %1;")
+        .arg(Styles::Colors::TextSecondary));
 
     headerLayout->addWidget(m_headerIcon);
     headerLayout->addWidget(m_headerLabel, 1);
@@ -62,8 +60,6 @@ void LessonPanel::setupUi()
     static_cast<ClickableWidget*>(header)->onClick = [this]() { toggleCollapsed(); };
 
     mainLayout->addWidget(header);
-
-    // ── Body ──
     m_body = new QWidget(this);
     m_body->setObjectName("LessonBody");
     m_body->setAttribute(Qt::WA_StyledBackground, true);
@@ -72,27 +68,19 @@ void LessonPanel::setupUi()
     m_body->setFixedHeight(m_expandedHeight);
 
     auto* bodyLayout = new QGridLayout(m_body);
-    bodyLayout->setContentsMargins(12, 10, 12, 10);
+    bodyLayout->setContentsMargins(14, 12, 14, 12);
     bodyLayout->setHorizontalSpacing(20);
-    bodyLayout->setVerticalSpacing(6);
-
-    // Teacher
+    bodyLayout->setVerticalSpacing(8);
     auto* teacherLabel = new QLabel("Teacher:", m_body);
     m_teacherEdit = new QLineEdit(m_body);
     m_teacherEdit->setPlaceholderText("Enter teacher name...");
-
-    // Lesson Name
     auto* lessonLabel = new QLabel("Lesson Name:", m_body);
     m_lessonEdit = new QLineEdit(m_body);
     m_lessonEdit->setPlaceholderText("Enter lesson name...");
-
-    // Objectives
     auto* objectivesLabel = new QLabel("Objectives:", m_body);
     m_objectivesEdit = new QTextEdit(m_body);
     m_objectivesEdit->setPlaceholderText("Enter lesson objectives...");
     m_objectivesEdit->setMaximumHeight(50);
-
-    // Outcome
     auto* outcomeLabel = new QLabel("Outcome:", m_body);
     m_outcomeEdit = new QTextEdit(m_body);
     m_outcomeEdit->setPlaceholderText("Enter expected outcomes...");
@@ -111,11 +99,9 @@ void LessonPanel::setupUi()
     bodyLayout->setColumnStretch(3, 1);
 
     mainLayout->addWidget(m_body);
-
-    // Animation
     m_animation = new QPropertyAnimation(this, "bodyHeight", this);
-    m_animation->setDuration(200);
-    m_animation->setEasingCurve(QEasingCurve::InOutQuad);
+    m_animation->setDuration(250);
+    m_animation->setEasingCurve(QEasingCurve::OutCubic);
 }
 
 void LessonPanel::toggleCollapsed()
@@ -133,14 +119,14 @@ void LessonPanel::setCollapsed(bool collapsed)
     m_animation->setEndValue(collapsed ? 0 : m_expandedHeight);
     m_animation->start();
 
-    m_collapseIndicator->setText(collapsed ? "▶" : "▼");
+    m_collapseIndicator->setText(collapsed ? ">" : "v");
 
     emit collapsedChanged(collapsed);
 }
 
 int LessonPanel::bodyHeight() const
 {
-    return m_body->maximumHeight();
+    return m_body->height();
 }
 
 void LessonPanel::setBodyHeight(int height)
@@ -155,7 +141,7 @@ void LessonPanel::setBodyHeight(int height)
 
 void LessonPanel::saveSettings()
 {
-    QSettings settings("LabMonitor", "TeacherConsole");
+    QSettings settings("SiManta", "TeacherConsole");
     settings.beginGroup("LessonDetails");
     settings.setValue("teacher", m_teacherEdit->text());
     settings.setValue("lesson", m_lessonEdit->text());
@@ -167,7 +153,7 @@ void LessonPanel::saveSettings()
 
 void LessonPanel::loadSettings()
 {
-    QSettings settings("LabMonitor", "TeacherConsole");
+    QSettings settings("SiManta", "TeacherConsole");
     settings.beginGroup("LessonDetails");
     m_teacherEdit->setText(settings.value("teacher", "").toString());
     m_lessonEdit->setText(settings.value("lesson", "").toString());
@@ -179,9 +165,9 @@ void LessonPanel::loadSettings()
         m_collapsed = true;
         m_body->setFixedHeight(0);
         m_body->setVisible(false);
-        m_collapseIndicator->setText("▶");
+        m_collapseIndicator->setText(">");
     }
     settings.endGroup();
 }
 
-} // namespace LabMonitor
+}

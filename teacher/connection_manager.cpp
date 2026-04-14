@@ -4,8 +4,11 @@
 #include <QDateTime>
 #include <QImage>
 #include <QBuffer>
+#include <QFile>
+#include <QFileInfo>
 
 namespace LabMonitor {
+static constexpr qint64 MAX_BUFFER_SIZE = 20 * 1024 * 1024;
 
 ConnectionManager::ConnectionManager(QObject* parent)
     : QObject(parent)
@@ -40,7 +43,6 @@ bool ConnectionManager::startListening(uint16_t port)
 
 void ConnectionManager::stopListening()
 {
-    // Disconnect all clients
     for (auto it = m_clients.begin(); it != m_clients.end(); ) {
         auto* socket = it.key();
         if (it.value().timeoutTimer) {
@@ -91,8 +93,6 @@ void ConnectionManager::onNewConnection()
         ClientState state;
         state.socket = socket;
         state.info.ipAddress = socket->peerAddress().toString();
-
-        // Timeout timer
         state.timeoutTimer = new QTimer(this);
         state.timeoutTimer->setSingleShot(true);
         state.timeoutTimer->setInterval(TIMEOUT_MS);
@@ -107,8 +107,6 @@ void ConnectionManager::onNewConnection()
                 this, &ConnectionManager::onClientReadyRead);
         connect(socket, &QTcpSocket::disconnected,
                 this, &ConnectionManager::onClientDisconnected);
-
-        // Send ACK
         socket->write(createPacket(MsgType::ACK));
     }
 }
@@ -119,8 +117,12 @@ void ConnectionManager::onClientReadyRead()
     if (!socket || !m_clients.contains(socket)) return;
 
     m_clients[socket].readBuffer.append(socket->readAll());
-
-    // Reset timeout
+    if (m_clients[socket].readBuffer.size() > MAX_BUFFER_SIZE) {
+        qWarning() << "[ConnectionManager] Buffer exceeded limit for"
+                    << socket->peerAddress().toString() << ", disconnecting";
+        socket->disconnectFromHost();
+        return;
+    }
     if (m_clients[socket].timeoutTimer) {
         m_clients[socket].timeoutTimer->start();
     }
@@ -140,16 +142,12 @@ void ConnectionManager::processClientData(QTcpSocket* socket)
             client.readBuffer.clear();
             return;
         }
-
-        int totalSize = HEADER_SIZE + static_cast<int>(header.payloadLength);
+        qint64 totalSize = static_cast<qint64>(HEADER_SIZE) + static_cast<qint64>(header.payloadLength);
         if (client.readBuffer.size() < totalSize) {
-            // Need more data — wait
             return;
         }
-
-        // Extract payload
         QByteArray payload = client.readBuffer.mid(HEADER_SIZE, static_cast<int>(header.payloadLength));
-        client.readBuffer.remove(0, totalSize);
+        client.readBuffer.remove(0, static_cast<int>(totalSize));
 
         MsgType type = static_cast<MsgType>(header.msgType & 0xFF);
 
@@ -161,11 +159,9 @@ void ConnectionManager::processClientData(QTcpSocket* socket)
             handleFrame(socket, payload);
             break;
         case MsgType::PING:
-            // Respond with PONG
             socket->write(createPacket(MsgType::PONG));
             break;
         case MsgType::PONG:
-            // Keepalive response — already reset timeout above
             break;
         case MsgType::CHAT_MSG: {
             ChatData chat;
@@ -188,7 +184,19 @@ void ConnectionManager::processClientData(QTcpSocket* socket)
                     QJsonObject obj = doc.object();
                     client.info.activeApp = obj.value("app").toString();
                     client.info.activeAppClass = obj.value("class").toString();
-                    emit appStatusReceived(client.info.id, client.info.activeApp, client.info.activeAppClass);
+                    QPixmap appIcon;
+                    QString iconB64 = obj.value("icon").toString();
+                    if (!iconB64.isEmpty()) {
+                        QByteArray iconData = QByteArray::fromBase64(iconB64.toUtf8());
+                        appIcon.loadFromData(iconData, "PNG");
+                    }
+
+                    double cpuUsage = obj.value("cpuUsage").toDouble(-1.0);
+                    double ramUsage = obj.value("ramUsage").toDouble(-1.0);
+
+                    emit appStatusReceived(client.info.id, client.info.activeApp,
+                                           client.info.activeAppClass, appIcon,
+                                           cpuUsage, ramUsage);
                 }
             }
             break;
@@ -218,8 +226,6 @@ void ConnectionManager::handleHello(QTcpSocket* socket, const QByteArray& payloa
     qInfo() << "[ConnectionManager] HELLO from" << client.info.hostname
              << "(" << client.info.username << "@" << client.info.ipAddress << ")"
              << "screen:" << client.info.screenRes;
-
-    // ACK
     socket->write(createPacket(MsgType::ACK));
 
     emit studentConnected(client.info);
@@ -234,8 +240,6 @@ void ConnectionManager::handleFrame(QTcpSocket* socket, const QByteArray& payloa
                     << socket->peerAddress().toString();
         return;
     }
-
-    // Decode JPEG
     QImage image;
     if (!image.loadFromData(payload, "JPEG")) {
         qWarning() << "[ConnectionManager] Failed to decode JPEG frame from"
@@ -271,7 +275,6 @@ void ConnectionManager::onClientTimeout()
                 << "(" << socket->peerAddress().toString() << ")";
 
     socket->disconnectFromHost();
-    // removeClient will be called by onClientDisconnected
 }
 
 void ConnectionManager::removeClient(QTcpSocket* socket)
@@ -335,8 +338,6 @@ void ConnectionManager::sendMessageToAll(const QString& title, const QString& bo
     }
 }
 
-// ── Lock/Unlock helpers ───────────────────────────────────────
-
 void ConnectionManager::sendLockScreen(const QStringList& studentIds)
 {
     QByteArray packet = createPacket(MsgType::LOCK_SCREEN);
@@ -385,8 +386,6 @@ void ConnectionManager::sendUnlockAll()
     qInfo() << "[ConnectionManager] Sent UNLOCK to ALL students";
 }
 
-// ── URL helpers ───────────────────────────────────────────────
-
 void ConnectionManager::sendUrl(const QStringList& studentIds, const QString& url)
 {
     QByteArray payload = createUrlPayload(url);
@@ -413,8 +412,6 @@ void ConnectionManager::sendUrlToAll(const QString& url)
     qInfo() << "[ConnectionManager] Sent URL to ALL students";
 }
 
-// ── Chat helper ──────────────────────────────────────────────
-
 void ConnectionManager::sendChatTo(const QString& studentId, const QString& sender,
                                    const QString& message)
 {
@@ -431,4 +428,94 @@ void ConnectionManager::sendChatTo(const QString& studentId, const QString& send
     }
 }
 
-} // namespace LabMonitor
+void ConnectionManager::sendFile(const QStringList& studentIds, const QString& filePath, bool isFolder)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "[ConnectionManager] Cannot open file:" << filePath;
+        return;
+    }
+
+    QString fileName = QFileInfo(filePath).fileName();
+    qint64 fileSize = file.size();
+    QList<QTcpSocket*> targets;
+    for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+        if (!it.value().helloReceived) continue;
+        if (studentIds.contains(it.value().info.id)) {
+            targets.append(it.key());
+        }
+    }
+
+    if (targets.isEmpty()) {
+        qWarning() << "[ConnectionManager] No matching students for file transfer";
+        return;
+    }
+    QByteArray startPayload = createFileStartPayload(fileName, fileSize, isFolder);
+    QByteArray startPacket = createPacket(MsgType::TRANSFER_START, startPayload);
+    for (auto* s : targets) {
+        s->write(startPacket);
+        s->flush();
+    }
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    constexpr int CHUNK_SIZE = 512 * 1024;
+    int totalChunks = (fileData.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    int chunkIndex = 0;
+
+    qInfo() << "[ConnectionManager] Starting file transfer:" << fileName
+             << "size:" << fileSize << "chunks:" << totalChunks;
+    auto sharedData = QSharedPointer<QByteArray>::create(fileData);
+    auto sharedTargets = QSharedPointer<QList<QTcpSocket*>>::create(targets);
+    auto sharedFileName = QSharedPointer<QString>::create(fileName);
+    auto sharedIsFolder = QSharedPointer<bool>::create(isFolder);
+    auto sharedSendNextChunk = std::make_shared<std::function<void(int)>>();
+    *sharedSendNextChunk = [this, sharedData, sharedTargets, sharedFileName, sharedIsFolder,
+                            totalChunks, CHUNK_SIZE, sharedSendNextChunk](int idx) {
+        if (idx >= totalChunks) {
+            QByteArray endPayload = createFileEndPayload(*sharedFileName);
+            QByteArray endPacket = createPacket(MsgType::TRANSFER_END, endPayload);
+            for (auto* s : *sharedTargets) {
+                if (s && s->state() == QAbstractSocket::ConnectedState) {
+                    s->write(endPacket);
+                    s->flush();
+                }
+            }
+            qInfo() << "[ConnectionManager] File transfer complete:" << *sharedFileName;
+            emit fileTransferComplete(*sharedFileName);
+            return;
+        }
+
+        int offset = idx * CHUNK_SIZE;
+        int len = qMin(CHUNK_SIZE, static_cast<int>(sharedData->size()) - offset);
+        QByteArray chunk = sharedData->mid(offset, len);
+        QByteArray chunkPacket = createPacket(MsgType::TRANSFER_CHUNK, chunk);
+
+        for (auto* s : *sharedTargets) {
+            if (s && s->state() == QAbstractSocket::ConnectedState) {
+                s->write(chunkPacket);
+                s->flush();
+            }
+        }
+
+        int percent = static_cast<int>(((idx + 1) * 100) / totalChunks);
+        emit fileTransferProgress(*sharedFileName, percent);
+        QTimer::singleShot(5, this, [this, sharedSendNextChunk, idx]() {
+            (*sharedSendNextChunk)(idx + 1);
+        });
+    };
+    (*sharedSendNextChunk)(0);
+}
+
+void ConnectionManager::sendFileToAll(const QString& filePath, bool isFolder)
+{
+    QStringList allIds;
+    for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+        if (it.value().helloReceived) {
+            allIds.append(it.value().info.id);
+        }
+    }
+    sendFile(allIds, filePath, isFolder);
+}
+
+}

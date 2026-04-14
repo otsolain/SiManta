@@ -6,14 +6,13 @@
 #include <QTimer>
 #include <QMap>
 #include <QPixmap>
+#include <QBuffer>
+#include <QFile>
 
 #include "protocol.h"
 
 namespace LabMonitor {
 
-/**
- * ClientState — tracks the state and data buffer of each connected student.
- */
 struct ClientState {
     QTcpSocket*  socket = nullptr;
     StudentInfo  info;
@@ -23,17 +22,6 @@ struct ClientState {
     QPixmap      lastFrame;
 };
 
-/**
- * ConnectionManager — TCP server that manages student connections.
- * 
- * Handles:
- * - Listening on configured port
- * - Accepting new student connections
- * - Parsing binary protocol (HELLO, FRAME, PING)
- * - Per-student state management
- * - Timeout detection (disconnects students who stop responding)
- * - Signals for new connections, disconnections, and frame updates
- */
 class ConnectionManager : public QObject
 {
     Q_OBJECT
@@ -41,38 +29,24 @@ class ConnectionManager : public QObject
 public:
     explicit ConnectionManager(QObject* parent = nullptr);
     ~ConnectionManager() override;
-
-    // Start/stop listening
     bool startListening(uint16_t port = DEFAULT_PORT);
     void stopListening();
     bool isListening() const;
-
-    // Get connected count
     int connectedCount() const { return m_clients.size(); }
-
-    // Get student info list
     QList<StudentInfo> connectedStudents() const;
-
-    // Send a message to specific students
     void sendMessage(const QStringList& studentIds, const QString& title,
                      const QString& body, const QString& sender);
-
-    // Send a message to all connected students
     void sendMessageToAll(const QString& title, const QString& body,
                           const QString& sender);
-
-    // Lock/unlock screens
     void sendLockScreen(const QStringList& studentIds);
     void sendUnlockScreen(const QStringList& studentIds);
     void sendLockAll();
     void sendUnlockAll();
-
-    // Send URL to students
     void sendUrl(const QStringList& studentIds, const QString& url);
     void sendUrlToAll(const QString& url);
-
-    // Send chat message to a student
     void sendChatTo(const QString& studentId, const QString& sender, const QString& message);
+    void sendFile(const QStringList& studentIds, const QString& filePath, bool isFolder);
+    void sendFileToAll(const QString& filePath, bool isFolder);
 
 signals:
     void studentConnected(const StudentInfo& info);
@@ -82,7 +56,11 @@ signals:
     void listenError(const QString& error);
     void chatReceived(const QString& studentId, const QString& sender, const QString& message);
     void helpRequestReceived(const QString& studentId, const QString& studentName, const QString& message);
-    void appStatusReceived(const QString& studentId, const QString& appName, const QString& appClass);
+    void appStatusReceived(const QString& studentId, const QString& appName,
+                           const QString& appClass, const QPixmap& appIcon,
+                           double cpuUsage, double ramUsage);
+    void fileTransferProgress(const QString& fileName, int percentDone);
+    void fileTransferComplete(const QString& fileName);
 
 private slots:
     void onNewConnection();
@@ -101,4 +79,4 @@ private:
     QMap<QTcpSocket*, ClientState> m_clients;
 };
 
-} // namespace LabMonitor
+}

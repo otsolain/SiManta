@@ -8,10 +8,6 @@
 
 namespace LabMonitor {
 
-// ════════════════════════════════════════════════════════════
-// FlowLayout Implementation
-// ════════════════════════════════════════════════════════════
-
 FlowLayout::FlowLayout(QWidget* parent, int margin, int hSpacing, int vSpacing)
     : QLayout(parent), m_hSpace(hSpacing), m_vSpace(vSpacing)
 {
@@ -67,9 +63,8 @@ int FlowLayout::verticalSpacing() const
 
 int FlowLayout::doLayout(const QRect& rect, bool testOnly) const
 {
-    int left, top, right, bottom;
-    getContentsMargins(&left, &top, &right, &bottom);
-    QRect effectiveRect = rect.adjusted(+left, +top, -right, -bottom);
+    QMargins m = contentsMargins();
+    QRect effectiveRect = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom());
     int x = effectiveRect.x();
     int y = effectiveRect.y();
     int lineHeight = 0;
@@ -95,7 +90,7 @@ int FlowLayout::doLayout(const QRect& rect, bool testOnly) const
         x = nextX;
         lineHeight = qMax(lineHeight, item->sizeHint().height());
     }
-    return y + lineHeight - rect.y() + bottom;
+    return y + lineHeight - rect.y() + m.bottom();
 }
 
 int FlowLayout::smartSpacing(QStyle::PixelMetric pm) const
@@ -109,31 +104,23 @@ int FlowLayout::smartSpacing(QStyle::PixelMetric pm) const
     return static_cast<QLayout*>(parent)->spacing();
 }
 
-// ════════════════════════════════════════════════════════════
-// StudentGrid Implementation
-// ════════════════════════════════════════════════════════════
-
 StudentGrid::StudentGrid(QWidget* parent)
     : QWidget(parent)
 {
     auto* mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
-
-    // Tab header "All (0)"
-    m_tabHeader = new QLabel("All (0)", this);
+    m_tabHeader = new QLabel("All Students (0)", this);
     auto* tabHeaderWidget = new QWidget(this);
     tabHeaderWidget->setObjectName("TabHeader");
     tabHeaderWidget->setAttribute(Qt::WA_StyledBackground, true);
     tabHeaderWidget->setAutoFillBackground(true);
     tabHeaderWidget->setStyleSheet(Styles::tabHeaderStyle());
     auto* tabLayout = new QHBoxLayout(tabHeaderWidget);
-    tabLayout->setContentsMargins(12, 4, 12, 4);
+    tabLayout->setContentsMargins(16, 6, 16, 6);
     tabLayout->addWidget(m_tabHeader);
     tabLayout->addStretch();
     mainLayout->addWidget(tabHeaderWidget);
-
-    // Scroll area
     m_scrollArea = new QScrollArea(this);
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -142,13 +129,11 @@ StudentGrid::StudentGrid(QWidget* parent)
 
     m_gridContainer = new QWidget();
     m_gridContainer->setStyleSheet(QStringLiteral("background: %1;").arg(Styles::Colors::MainBg));
-    m_flowLayout = new FlowLayout(m_gridContainer, 16, 12, 12);
+    m_flowLayout = new FlowLayout(m_gridContainer, 20, 16, 16);
     m_gridContainer->setLayout(m_flowLayout);
 
     m_scrollArea->setWidget(m_gridContainer);
     mainLayout->addWidget(m_scrollArea, 1);
-
-    // Empty state label
     m_emptyLabel = new QLabel(this);
     m_emptyLabel->setText("Waiting for students to connect...");
     m_emptyLabel->setAlignment(Qt::AlignCenter);
@@ -160,7 +145,7 @@ StudentGrid::StudentGrid(QWidget* parent)
         "  font-style: italic;"
         "  background: transparent;"
         "  border: none;"
-        "  padding: 60px;"
+        "  padding: 80px;"
         "}"
     ).arg(Styles::Colors::TextMuted,
           Styles::Fonts::Family,
@@ -267,8 +252,6 @@ void StudentGrid::setThumbnailSize(int size)
     for (auto* tile : m_tiles) {
         tile->setThumbnailSize(thumbSize);
     }
-
-    // Force layout recalculation
     m_gridContainer->updateGeometry();
 }
 
@@ -279,17 +262,15 @@ void StudentGrid::onTileClicked(const QString& studentId)
 
     bool ctrl = qApp->keyboardModifiers() & Qt::ControlModifier;
 
-    if (!ctrl) {
-        // Deselect all others, keep clicked tile's current state
-        bool clickedState = clickedTile->isSelected();
+    if (ctrl) {
+        clickedTile->toggleSelected();
+    } else {
+        bool wasSelected = clickedTile->isSelected();
         for (auto* tile : m_tiles) {
-            if (tile != clickedTile) {
-                tile->setSelected(false);
-            }
+            tile->setSelected(false);
         }
-        // Tile already toggled by mousePressEvent, don't change it
+        clickedTile->setSelected(!wasSelected);
     }
-    // With Ctrl: tile already toggled, nothing else to do
 
     emit studentClicked(studentId);
     emit selectionChanged();
@@ -301,7 +282,7 @@ void StudentGrid::updateTabHeader()
     for (auto* tile : m_tiles) {
         if (tile->isOnline()) online++;
     }
-    m_tabHeader->setText(QStringLiteral("All (%1)").arg(m_tiles.size()));
+    m_tabHeader->setText(QStringLiteral("All Students (%1)").arg(m_tiles.size()));
 }
 
 void StudentGrid::updateEmptyState()
@@ -311,4 +292,4 @@ void StudentGrid::updateEmptyState()
     m_scrollArea->setVisible(!empty);
 }
 
-} // namespace LabMonitor
+}

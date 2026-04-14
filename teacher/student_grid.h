@@ -13,11 +13,6 @@
 
 namespace LabMonitor {
 
-/**
- * FlowLayout — Custom layout that arranges widgets in a flowing grid,
- * automatically wrapping to the next row when the width is exceeded.
- * This provides responsive grid behavior like CSS flexbox wrap.
- */
 class FlowLayout : public QLayout
 {
     Q_OBJECT
@@ -49,42 +44,22 @@ private:
     int m_vSpace;
 };
 
-/**
- * StudentGrid — Scrollable area containing student tiles in a flow layout.
- * Includes a tab header showing "All (N)" count and an empty state message.
- */
 class StudentGrid : public QWidget
 {
     Q_OBJECT
 
 public:
     explicit StudentGrid(QWidget* parent = nullptr);
-
-    // Add/remove students
     StudentTile* addStudent(const StudentInfo& info);
     void removeStudent(const QString& studentId);
-
-    // Update a student's screenshot
     void updateScreenshot(const QString& studentId, const QPixmap& pixmap);
-
-    // Update student online status
     void setStudentOnline(const QString& studentId, bool online);
-
-    // Get a tile
     StudentTile* getTile(const QString& studentId) const;
-
-    // Get all tiles
     QList<StudentTile*> allTiles() const;
-
-    // Selection
     void selectAll();
     void deselectAll();
     QList<StudentTile*> selectedTiles() const;
-
-    // Thumbnail size
     void setThumbnailSize(int size);
-
-    // Count
     int studentCount() const { return m_tiles.size(); }
     StudentTile* tileById(const QString& id) const { return m_tiles.value(id, nullptr); }
 
@@ -110,4 +85,4 @@ private:
     int m_thumbWidth = 240;
 };
 
-} // namespace LabMonitor
+}

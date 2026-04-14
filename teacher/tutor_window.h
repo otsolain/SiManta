@@ -17,18 +17,6 @@
 
 namespace LabMonitor {
 
-/**
- * TutorWindow — Main application window for the Teacher Console.
- * 
- * Assembles all UI components:
- * - Toolbar (ribbon-style, top)
- * - Sidebar (navigation, left)
- * - Student Grid (thumbnail flow, center)
- * - Lesson Panel (collapsible, bottom)
- * - Status Bar (connection info + controls, bottom)
- *
- * Manages ConnectionManager and routes events to UI.
- */
 class TutorWindow : public QMainWindow
 {
     Q_OBJECT
@@ -57,29 +45,21 @@ private:
     void updateStatusLabel();
     void saveSettings();
     void loadSettings();
-
-    // Components
     ToolbarWidget*     m_toolbar = nullptr;
     SidebarWidget*     m_sidebar = nullptr;
     StudentGrid*       m_grid = nullptr;
     LessonPanel*       m_lessonPanel = nullptr;
     ConnectionManager* m_connManager = nullptr;
-
-    // Status bar
     QWidget* m_statusBarWidget = nullptr;
     QLabel*  m_updateSpeedLabel = nullptr;
     QSlider* m_updateSpeedSlider = nullptr;
     QLabel*  m_thumbSizeLabel = nullptr;
     QSlider* m_thumbSizeSlider = nullptr;
     QLabel*  m_statusLabel = nullptr;
-
-    // Shortcuts
     QShortcut* m_selectAllShortcut = nullptr;
     QShortcut* m_deselectShortcut = nullptr;
     QShortcut* m_refreshShortcut = nullptr;
-
-    // Help requests log
     QStringList m_helpRequests;
 };
 
-} // namespace LabMonitor
+}

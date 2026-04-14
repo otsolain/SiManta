@@ -7,10 +7,6 @@
 
 namespace LabMonitor {
 
-/**
- * SidebarWidget — Narrow left navigation sidebar with icon-only buttons.
- * Dark navy background matching NetSupport School's look.
- */
 class SidebarWidget : public QWidget
 {
     Q_OBJECT
@@ -28,4 +24,4 @@ private:
     QButtonGroup* m_buttonGroup;
 };
 
-} // namespace LabMonitor
+}

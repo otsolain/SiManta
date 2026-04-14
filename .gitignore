@@ -1,21 +1,38 @@
-# Build
+*.d
+*.slo
+*.lo
+*.o
+*.obj
+*.gch
+*.pch
+*.so
+*.dylib
+*.dll
+*.mod
+*.smod
+*.lai
+*.la
+*.a
+*.lib
+*.exe
+*.out
+*.app
+
+CMakeLists.txt.user
+*.qm
+*.stash
+
+.vs/
+.vscode/
+*.user
+*.suo
+
 build/
 dist/
-installer/output/
+release/
+debug/
 
-# IDE
-.vscode/
-.idea/
-*.user
-*.swp
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Qt
-moc_*
-ui_*
-qrc_*
-*_autogen/
+tools/
+strip_comments.*
+netsupport_school_research.md
+*.log

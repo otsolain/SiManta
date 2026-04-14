@@ -15,13 +15,11 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setAutoFillBackground(true);
     setStyleSheet(Styles::toolbarStyle());
-    setFixedHeight(76);
+    setFixedHeight(88);
 
     m_layout = new QHBoxLayout(this);
     m_layout->setContentsMargins(8, 4, 8, 4);
     m_layout->setSpacing(2);
-
-    // ── Group 1: Connection ──
     auto* btnRefresh  = createToolButton(":/icons/icons/refresh.svg", "Refresh");
     auto* btnConnect  = createToolButton(":/icons/icons/connect.svg", "Connect");
     auto* btnRegister = createToolButton(":/icons/icons/register.svg", "Student\nRegister");
@@ -33,8 +31,6 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
     m_layout->addWidget(btnSendUrl);
 
     m_layout->addWidget(createSeparator());
-
-    // ── Group 2: Control ──
     auto* btnBlockAll = createToolButton(":/icons/icons/block_all.svg", "Block All", true);
     auto* btnMessage  = createToolButton(":/icons/icons/message.svg", "Message", true);
     auto* btnLock     = createToolButton(":/icons/icons/lock.svg", "Lock", true);
@@ -46,22 +42,21 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
     m_layout->addWidget(btnUnlock);
 
     m_layout->addWidget(createSeparator());
-
-    // ── Group 3: Communication ──
     auto* btnChat = createToolButton(":/icons/icons/chat.svg", "Chat", true);
     auto* btnHelp = createToolButton(":/icons/icons/help.svg", "Help\nRequests", true);
 
     m_layout->addWidget(btnChat);
     m_layout->addWidget(btnHelp);
 
-    // Spacer to push About to the right
-    m_layout->addStretch();
+    m_layout->addWidget(createSeparator());
+    auto* btnSendFile   = createToolButton(":/icons/icons/send_url.svg", "Send\nFile", true);
+    auto* btnSendFolder = createToolButton(":/icons/icons/send_url.svg", "Send\nFolder", true);
 
-    // ── Group 4: About ──
+    m_layout->addWidget(btnSendFile);
+    m_layout->addWidget(btnSendFolder);
+    m_layout->addStretch();
     auto* btnAbout = createToolButton(":/icons/icons/about.svg", "About");
     m_layout->addWidget(btnAbout);
-
-    // ── Connections ──
     connect(btnRefresh, &QToolButton::clicked, this, &ToolbarWidget::refreshClicked);
     connect(btnConnect, &QToolButton::clicked, this, &ToolbarWidget::connectClicked);
     connect(btnRegister, &QToolButton::clicked, this, &ToolbarWidget::registerClicked);
@@ -72,6 +67,8 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
     connect(btnUnlock, &QToolButton::clicked, this, &ToolbarWidget::unlockClicked);
     connect(btnChat, &QToolButton::clicked, this, &ToolbarWidget::chatClicked);
     connect(btnHelp, &QToolButton::clicked, this, &ToolbarWidget::helpRequestsClicked);
+    connect(btnSendFile, &QToolButton::clicked, this, &ToolbarWidget::sendFileClicked);
+    connect(btnSendFolder, &QToolButton::clicked, this, &ToolbarWidget::sendFolderClicked);
     connect(btnAbout, &QToolButton::clicked, this, &ToolbarWidget::aboutClicked);
 }
 
@@ -81,12 +78,12 @@ QToolButton* ToolbarWidget::createToolButton(const QString& iconPath, const QStr
     auto* btn = new QToolButton(this);
     btn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
     btn->setIcon(QIcon(iconPath));
-    btn->setIconSize(QSize(24, 24));
+    btn->setIconSize(QSize(28, 28));
     btn->setText(label);
     btn->setEnabled(enabled);
     btn->setCursor(enabled ? Qt::PointingHandCursor : Qt::ForbiddenCursor);
-    btn->setMinimumWidth(72);
-    btn->setMaximumHeight(66);
+    btn->setMinimumWidth(80);
+    btn->setMaximumHeight(76);
     btn->setAutoRaise(true);
 
     btn->setStyleSheet(Styles::toolbarButtonStyle());
@@ -99,8 +96,8 @@ QFrame* ToolbarWidget::createSeparator()
     auto* sep = new QFrame(this);
     sep->setFrameShape(QFrame::VLine);
     sep->setStyleSheet(Styles::toolbarSeparatorStyle());
-    sep->setFixedHeight(54);
+    sep->setFixedHeight(64);
     return sep;
 }
 
-} // namespace LabMonitor
+}
