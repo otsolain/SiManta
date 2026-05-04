@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(png2ico LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui)
+add_executable(png2ico png2ico.cpp)
+target_link_libraries(png2ico PRIVATE Qt6::Core Qt6::Gui)

@@ -1,0 +1,90 @@
+    connect(m_toolbar, &ToolbarWidget::helpRequestsClicked, this, [this]() {
+        m_unreadHelpCount = 0;
+        m_toolbar->setUnreadHelpCount(0);
+
+        auto* dialog = new QDialog(this);
+        dialog->setWindowTitle("Permintaan Bantuan");
+        dialog->setMinimumSize(540, 480);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setStyleSheet(Styles::dialogStyle());
+
+        auto* layout = new QVBoxLayout(dialog);
+        layout->setContentsMargins(24, 24, 24, 24);
+        layout->setSpacing(16);
+
+        auto* header = new QLabel("Permintaan Bantuan Murid", dialog);
+        header->setStyleSheet("font-size: 16pt; font-weight: bold; color: #1E293B;");
+
+        auto* scrollArea = new QScrollArea(dialog);
+        scrollArea->setWidgetResizable(true);
+        scrollArea->setStyleSheet("QScrollArea { border: none; background: #F8FAFC; border-radius: 12px; }");
+        
+        auto* scrollContainer = new QWidget(scrollArea);
+        scrollContainer->setStyleSheet("background: transparent;");
+        auto* listLayout = new QVBoxLayout(scrollContainer);
+        listLayout->setContentsMargins(12, 12, 12, 12);
+        listLayout->setSpacing(12);
+
+        auto addCard = [listLayout](const QString& reqHtml) {
+            auto* card = new QFrame();
+            card->setStyleSheet(
+                "QFrame { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; }"
+                "QFrame:hover { border-color: #CBD5E1; }"
+            );
+            auto* cLayout = new QVBoxLayout(card);
+            cLayout->setContentsMargins(16, 12, 16, 12);
+            auto* lbl = new QLabel(reqHtml);
+            lbl->setWordWrap(true);
+            lbl->setTextFormat(Qt::RichText);
+            lbl->setStyleSheet("QLabel { background: transparent; border: none; }");
+            cLayout->addWidget(lbl);
+            listLayout->insertWidget(0, card); // Add to top (newest first)
+        };
+
+        if (m_helpRequests.isEmpty()) {
+            auto* emptyLbl = new QLabel("Belum ada permintaan bantuan.");
+            emptyLbl->setAlignment(Qt::AlignCenter);
+            emptyLbl->setStyleSheet("color: #94A3B8; font-size: 11pt; font-style: italic; background: transparent;");
+            listLayout->addWidget(emptyLbl);
+        } else {
+            for (const auto& req : m_helpRequests) {
+                addCard(req);
+            }
+        }
+        listLayout->addStretch();
+        scrollArea->setWidget(scrollContainer);
+
+        auto helpConn = connect(m_connManager, &ConnectionManager::helpRequestReceived,
+                dialog, [addCard, listLayout](const QString&, const QString& name, const QString& msg) {
+            // Remove the "empty" label if it exists
+            if (listLayout->count() > 1 && qobject_cast<QLabel*>(listLayout->itemAt(listLayout->count() - 2)->widget())) {
+                auto* w = listLayout->itemAt(listLayout->count() - 2)->widget();
+                listLayout->removeWidget(w);
+                w->deleteLater();
+            }
+            QString time = QDateTime::currentDateTime().toString("HH:mm");
+            QString html = QStringLiteral("<b style='color:#F59E0B; font-size:11pt;'>%1</b> <span style='color:#94A3B8; font-size:9pt;'>— %2</span><br><br><span style='font-size:10pt; color:#334155;'>%3</span>")
+                .arg(name.toHtmlEscaped(), time, msg.toHtmlEscaped());
+            addCard(html);
+        });
+
+        auto* btnRow = new QHBoxLayout();
+        btnRow->addStretch();
+        auto* closeBtn = new QPushButton("Tutup", dialog);
+        closeBtn->setStyleSheet(Styles::primaryButtonStyle());
+        closeBtn->setCursor(Qt::PointingHandCursor);
+        closeBtn->setMinimumWidth(100);
+        btnRow->addWidget(closeBtn);
+
+        layout->addWidget(header);
+        layout->addWidget(scrollArea, 1);
+        layout->addLayout(btnRow);
+
+        connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::close);
+
+        connect(dialog, &QDialog::destroyed, this, [helpConn]() {
+            QObject::disconnect(helpConn);
+        });
+
+        dialog->show();
+    });

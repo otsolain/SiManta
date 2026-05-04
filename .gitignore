@@ -1,0 +1,62 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Qt specific
+CMakeLists.txt.user
+*.qm
+*.stash
+
+# Installer output (optional, depending on if you want it)
+# We will explicitly add the setup file later if needed
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Build folders
+build/
+dist/
+release/
+debug/
+
+# Keep the setup installer!
+!dist/installer/SiManta-Setup-1.0.0.exe
+
+# Ignore custom build files and scripts as requested by user
+*.bat
+*.ps1
+build_tools/
+installer_output/
+crop_logo.cpp
