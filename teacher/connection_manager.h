@@ -93,7 +93,7 @@ private:
     void handleHello(QTcpSocket* socket, const QByteArray& payload);
     void handleFrame(QTcpSocket* socket, const QByteArray& payload);
     void handleDeltaFrame(QTcpSocket* socket, const QByteArray& payload);
-    void removeClient(QTcpSocket* socket);
+    void removeClient(QTcpSocket* socket, bool silent = false);
     QString clientId(QTcpSocket* socket) const;
     void sendBeaconPacket();
 

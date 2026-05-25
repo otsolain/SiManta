@@ -1,4 +1,4 @@
-add_executable(lab-teacher
+﻿add_executable(lab-teacher
     main.cpp
     tutor_window.cpp
     toolbar_widget.cpp
@@ -15,6 +15,7 @@ target_link_libraries(lab-teacher PRIVATE lab_common Qt6::Core Qt6::Widgets Qt6:
 if(WIN32)
     set_target_properties(lab-teacher PROPERTIES
         WIN32_EXECUTABLE TRUE
-        OUTPUT_NAME "SiMantaTeacher"
+        OUTPUT_NAME "SimantaTeacher"
     )
 endif()
+

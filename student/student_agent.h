@@ -11,19 +11,6 @@
 
 namespace LabMonitor {
 
-/**
- * StudentAgent — background agent that captures screen and streams to teacher
- * 
- * Handles:
- * - TCP connection to teacher console
- * - HELLO handshake on connect
- * - Periodic screen capture and FRAME streaming
- * - PING/PONG keepalive with health monitoring
- * - Auto-reconnect with fast recovery (Veyon-like)
- * - UDP auto-discovery of teacher beacon
- * - Adaptive quality based on network conditions
- * - App status reporting (foreground window + CPU/RAM)
- */
 class StudentAgent : public QObject
 {
     Q_OBJECT
@@ -111,6 +98,7 @@ private:
     qint64   m_incomingFileSize = 0;
     qint64   m_incomingReceived = 0;
     bool     m_incomingIsFolder = false;
+    bool     m_incomingSkip = false;  // set when collision policy says "skip"
 
     // CPU tracking (Windows)
     quint64  m_lastCpuIdle = 0;
@@ -135,6 +123,18 @@ private:
     QElapsedTimer m_lastPongTimer;                  // Track PONG response time
     bool     m_waitingForPong = false;              // Whether we're waiting for a PONG
     int      m_missedPongs = 0;                     // Consecutive missed PONGs
+
+    // ── Keyframe recovery: force full frame periodically to prevent stale-delta freezes ──
+    QElapsedTimer m_lastKeyframeTimer;              // Tracks time since last full frame
+    bool     m_forceKeyframe = false;               // If true, next capture must be a full frame
+    int      m_keyframeIntervalMs = 15000;          // Send keyframe every 15s (safety net)
+
+    // ── Throttle capture during incoming file transfer ──
+    // Heavy BitBlt+JPEG work can starve the socket readyRead() on weak PCs,
+    // making file transfers appear stuck. We slow capture down for the
+    // duration of TRANSFER_START -> TRANSFER_END.
+    bool     m_capturePausedForTransfer = false;
+    int      m_savedCaptureInterval = DEFAULT_CAPTURE_MS;
 };
 
 } 

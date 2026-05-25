@@ -16,19 +16,6 @@
 
 namespace LabMonitor {
 
-/**
- * StudentTile — Individual student thumbnail card with screenshot,
- * status indicator, hostname, and username.
- * 
- * Features:
- * - Dark card with rounded corners and drop shadow
- * - Screenshot display with aspect ratio preservation
- * - App badge overlay on top-left of screenshot
- * - Online/offline status dot
- * - Selection highlight (blue border)
- * - Hover effect
- * - Double-click for fullscreen view with zoom controls
- */
 class StudentTile : public QFrame
 {
     Q_OBJECT
@@ -39,6 +26,8 @@ public:
     ~StudentTile() override;
     void updateScreenshot(const QPixmap& pixmap);
     void updateInfo(const StudentInfo& info);
+    void setDisplayName(const QString& name);
+    QString displayName() const;
     void setOnline(bool online);
     bool isOnline() const { return m_online; }
     void setSelected(bool selected);
@@ -46,7 +35,8 @@ public:
     void toggleSelected();
     const StudentInfo& studentInfo() const { return m_info; }
     QString studentId() const { return m_info.id; }
-    QString studentName() const { return m_info.hostname; }
+    QString studentName() const { return displayName(); }
+    QString realHostname() const { return m_info.hostname; }
     void setThumbnailSize(const QSize& size);
     void setActiveApp(const QString& appName, const QString& appClass, const QPixmap& icon);
     void setCpuRam(double cpu, double ram);
@@ -57,6 +47,11 @@ signals:
     void fullscreenOpened(const QString& studentId);
     void fullscreenClosed(const QString& studentId);
     void contextMenuRequested(const QString& studentId, const QPoint& pos);
+    void renameRequested(const QString& studentId);
+    void renameCleared(const QString& studentId);
+    // Emitted whenever the displayed name changes (rename, clear, hostname update),
+    // so open dialogs / fullscreen views can refresh their labels live.
+    void displayNameChanged(const QString& studentId, const QString& newName);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -73,6 +68,7 @@ private:
     void createFullscreenDialog();
 
     StudentInfo  m_info;
+    QString      m_displayName;   // custom name set by teacher (overrides hostname)
     bool         m_selected = false;
     bool         m_online = false;
     QSize        m_thumbSize = QSize(240, 160);

@@ -24,17 +24,14 @@ SidebarWidget::SidebarWidget(QWidget* parent)
 
     m_btnMonitor  = createSidebarButton(":/icons/icons/monitor.svg", Lang::get().t("All Students", "Semua Siswa"));
     m_btnInternet = createSidebarButton(":/icons/icons/send_url.svg", Lang::get().t("Internet", "Internet"));
-    m_btnSecurity = createSidebarButton(":/icons/icons/security.svg", Lang::get().t("Security", "Keamanan"));
     m_btnSettings = createSidebarButton(":/icons/icons/settings.svg", Lang::get().t("Settings", "Pengaturan"));
 
     m_buttonGroup->addButton(m_btnMonitor, 0);
     m_buttonGroup->addButton(m_btnInternet, 1);
-    m_buttonGroup->addButton(m_btnSecurity, 2);
-    m_buttonGroup->addButton(m_btnSettings, 3);
+    m_buttonGroup->addButton(m_btnSettings, 2);
 
     m_layout->addWidget(m_btnMonitor);
     m_layout->addWidget(m_btnInternet);
-    m_layout->addWidget(m_btnSecurity);
     m_layout->addWidget(m_btnSettings);
     m_layout->addStretch();
     m_btnMonitor->setChecked(true);
@@ -60,7 +57,6 @@ void SidebarWidget::updateTranslations()
 {
     m_btnMonitor->setToolTip(Lang::get().t("All Students", "Semua Siswa"));
     m_btnInternet->setToolTip(Lang::get().t("Internet", "Internet"));
-    m_btnSecurity->setToolTip(Lang::get().t("Security", "Keamanan"));
     m_btnSettings->setToolTip(Lang::get().t("Settings", "Pengaturan"));
 }
 

@@ -1,20 +1,8 @@
-; ================================================================
-;  SiManta - Classroom Management System
-;  Inno Setup 6 Installer Script
-;
-;  Features:
-;  - Detects existing installation → offers Uninstall or Update
-;  - Radio button: Install as Teacher or Student
-;  - Teacher IP configuration (student only, default: auto-discovery)
-;  - Firewall rules for TCP (5400) and UDP (5401) discovery
-;  - Auto-start student agent on login
-;  - Proper uninstall cleanup (processes, firewall, registry)
-; ================================================================
-
+﻿
 #define MyAppName "Simanta"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Simanta Classroom"
-#define MyAppURL "https://simanta.id"
+#define MyAppURL "https://Simanta.id"
 #define MyAppCopyright "(c) 2026 Simanta. All rights reserved."
 
 [Setup]
@@ -39,95 +27,93 @@ WizardSizePercent=110,110
 PrivilegesRequired=admin
 DisableProgramGroupPage=yes
 UninstallDisplayName={#MyAppName}
-UninstallDisplayIcon={app}\logo.png
+UninstallDisplayIcon={app}\logo.ico
 VersionInfoDescription={#MyAppName} - Classroom Management System
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-; ================================================================
-;  Files - Both are always included, we select at runtime
-; ================================================================
 
 [Files]
-; Teacher Console files
 Source: "dist\teacher\*"; DestDir: "{app}\Teacher"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsTeacherInstall
-; Student Agent files
 Source: "dist\student\*"; DestDir: "{app}\Student"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsStudentInstall
-; Logo for uninstall display
-Source: "installer\logo.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "installer\logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "installer\simanta-recovery.bat"; DestDir: "{app}"; Flags: ignoreversion
 
-; ================================================================
-;  Start Menu & Desktop Shortcuts
-; ================================================================
 
 [Icons]
-; Teacher shortcuts
-Name: "{group}\SiManta Teacher"; Filename: "{app}\Teacher\SiMantaTeacher.exe"; Check: IsTeacherInstall; Comment: "Launch Teacher Console"
-Name: "{autodesktop}\SiManta Teacher"; Filename: "{app}\Teacher\SiMantaTeacher.exe"; Check: IsTeacherInstall; Comment: "SiManta Teacher Console"
+Name: "{group}\Simanta Teacher"; Filename: "{app}\Teacher\SimantaTeacher.exe"; Check: IsTeacherInstall; Comment: "Launch Teacher Console"
+Name: "{autodesktop}\Simanta Teacher"; Filename: "{app}\Teacher\SimantaTeacher.exe"; Check: IsTeacherInstall; Comment: "Simanta Teacher Console"
 
-; Student shortcuts
-Name: "{group}\SiManta Student"; Filename: "{app}\Student\SiMantaStudent.exe"; Check: IsStudentInstall; Comment: "Launch Student Agent"
+Name: "{group}\Simanta Student"; Filename: "{app}\Student\SimantaStudent.exe"; Check: IsStudentInstall; Comment: "Launch Student Agent"
 
-; Uninstaller
-Name: "{group}\Uninstall SiManta"; Filename: "{uninstallexe}"
+Name: "{group}\Uninstall Simanta"; Filename: "{uninstallexe}"
 
-; ================================================================
-;  Registry - Auto-start Student Agent on login
-; ================================================================
 
 [Registry]
-Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SiMantaStudent"; ValueData: """{app}\Student\SiMantaStudent.exe"""; Check: IsStudentInstall; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SimantaStudent"; ValueData: """{app}\Student\SimantaStudent.exe"""; Check: IsStudentInstall; Flags: uninsdeletevalue
 
-; ================================================================
-;  Post-Install: Launch App & Add Firewall Rules
-; ================================================================
 
 [Run]
-; Firewall rules for Teacher (TCP + UDP)
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Teacher TCP"" dir=in action=allow program=""{app}\Teacher\SiMantaTeacher.exe"" enable=yes profile=any protocol=tcp"; Check: IsTeacherInstall; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Teacher UDP"" dir=in action=allow program=""{app}\Teacher\SiMantaTeacher.exe"" enable=yes profile=any protocol=udp"; Check: IsTeacherInstall; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Beacon Out"" dir=out action=allow protocol=udp localport=5401 enable=yes profile=any"; Check: IsTeacherInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Simanta Teacher TCP"" dir=in action=allow program=""{app}\Teacher\SimantaTeacher.exe"" enable=yes profile=any protocol=tcp"; Check: IsTeacherInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Simanta Teacher UDP"" dir=in action=allow program=""{app}\Teacher\SimantaTeacher.exe"" enable=yes profile=any protocol=udp"; Check: IsTeacherInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Simanta Beacon Out"" dir=out action=allow protocol=udp localport=5401 enable=yes profile=any"; Check: IsTeacherInstall; Flags: runhidden
 
-; Firewall rules for Student (TCP + UDP)
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Student TCP"" dir=in action=allow program=""{app}\Student\SiMantaStudent.exe"" enable=yes profile=any protocol=tcp"; Check: IsStudentInstall; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Student UDP"" dir=in action=allow program=""{app}\Student\SiMantaStudent.exe"" enable=yes profile=any protocol=udp"; Check: IsStudentInstall; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""SiManta Discovery In"" dir=in action=allow protocol=udp localport=5401 enable=yes profile=any"; Check: IsStudentInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Simanta Student TCP"" dir=in action=allow program=""{app}\Student\SimantaStudent.exe"" enable=yes profile=any protocol=tcp"; Check: IsStudentInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Simanta Student UDP"" dir=in action=allow program=""{app}\Student\SimantaStudent.exe"" enable=yes profile=any protocol=udp"; Check: IsStudentInstall; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Simanta Discovery In"" dir=in action=allow protocol=udp localport=5401 enable=yes profile=any"; Check: IsStudentInstall; Flags: runhidden
 
-; (Task Scheduler removed to prevent invisible background process)
 
-; Launch after install
-Filename: "{app}\Teacher\SiMantaTeacher.exe"; Description: "Jalankan SiManta Teacher sekarang"; Check: IsTeacherInstall; Flags: nowait postinstall skipifsilent unchecked
-Filename: "{app}\Student\SiMantaStudent.exe"; Description: "Jalankan SiManta Student sekarang"; Check: IsStudentInstall; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\Teacher\SimantaTeacher.exe"; Description: "Jalankan Simanta Teacher sekarang"; Check: IsTeacherInstall; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\Student\SimantaStudent.exe"; Description: "Jalankan Simanta Student sekarang"; Check: IsStudentInstall; Flags: nowait postinstall skipifsilent unchecked
 
-; ================================================================
-;  Uninstall Cleanup
-; ================================================================
 
 [UninstallRun]
-; Kill running processes
-Filename: "taskkill"; Parameters: "/f /im SiMantaTeacher.exe"; Flags: runhidden
-Filename: "taskkill"; Parameters: "/f /im SiMantaStudent.exe"; Flags: runhidden
-; Remove ALL SiManta firewall rules
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Teacher TCP"""; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Teacher UDP"""; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Beacon Out"""; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Student TCP"""; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Student UDP"""; Flags: runhidden
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""SiManta Discovery In"""; Flags: runhidden
+Filename: "taskkill"; Parameters: "/f /im SimantaTeacher.exe"; Flags: runhidden
+Filename: "taskkill"; Parameters: "/f /im SimantaStudent.exe"; Flags: runhidden
+; Wait a moment for processes to fully terminate
+Filename: "cmd"; Parameters: "/c timeout /t 1 /nobreak >nul"; Flags: runhidden
+; Remove firewall rules
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Teacher TCP"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Teacher UDP"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Beacon Out"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Student TCP"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Student UDP"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Discovery In"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Block QUIC"""; Flags: runhidden
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Simanta Block TCP"""; Flags: runhidden
+; Reset proxy/PAC settings that the student agent may have set
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings"" /v ProxySettingsPerUser /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings"" /v EnableLegacyAutoProxyFeatures /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings"" /v AutoConfigURL /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"" /v AutoConfigURL /f"; Flags: runhidden
+Filename: "reg"; Parameters: "add ""HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings"" /v ProxyEnable /t REG_DWORD /d 0 /f"; Flags: runhidden
+Filename: "reg"; Parameters: "add ""HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"" /v ProxyEnable /t REG_DWORD /d 0 /f"; Flags: runhidden
+; Re-enable Task Manager, Registry Editor, Control Panel, USB
+Filename: "reg"; Parameters: "delete ""HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System"" /v DisableTaskMgr /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System"" /v DisableTaskMgr /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System"" /v DisableRegistryTools /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System"" /v DisableRegistryTools /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"" /v NoControlPanel /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"" /v NoControlPanel /f"; Flags: runhidden
+Filename: "reg"; Parameters: "add ""HKLM\System\CurrentControlSet\Services\USBSTOR"" /v Start /t REG_DWORD /d 3 /f"; Flags: runhidden
+; Remove browser policy values Simanta wrote (keep the parent keys intact so
+; other software's policy values aren't collateral damage).
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Google\Chrome"" /v DnsOverHttpsMode /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Google\Chrome"" /v QuicAllowed /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Google\Chrome"" /v ProxySettings /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Microsoft\Edge"" /v DnsOverHttpsMode /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Microsoft\Edge"" /v QuicAllowed /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Microsoft\Edge"" /v ProxySettings /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\BraveSoftware\Brave"" /v DnsOverHttpsMode /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\BraveSoftware\Brave"" /v QuicAllowed /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Mozilla\Firefox"" /v DNSOverHTTPS /f"; Flags: runhidden
+Filename: "reg"; Parameters: "delete ""HKLM\SOFTWARE\Policies\Mozilla\Firefox\Proxy"" /f"; Flags: runhidden
 
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 
-; ================================================================
-;  Pascal Script
-;  - Detect existing installation
-;  - Role selection (Teacher / Student)
-;  - Teacher IP config for student
-;  - Write config.ini
-; ================================================================
 
 [Code]
 var
@@ -147,7 +133,6 @@ begin
   Result := (RoleSelected = 1);
 end;
 
-// ── Detect existing installation and offer uninstall/update ──
 function GetUninstallString(): String;
 var
   sUnInstPath: String;
@@ -210,23 +195,19 @@ begin
     if OldVersion = '' then
       OldVersion := 'versi tidak diketahui';
 
-    Msg := 'SiManta sudah terinstall di komputer ini.' + #13#10 + #13#10 +
+    Msg := 'Simanta sudah terinstall di komputer ini.' + #13#10 + #13#10 +
            'Pilih tindakan:' + #13#10 +
-           '  • Klik YA untuk update (hapus lama, install baru)' + #13#10 +
-           '  • Klik TIDAK untuk membatalkan instalasi';
+           '  * Klik YA untuk update (hapus lama, install baru)' + #13#10 +
+           '  * Klik TIDAK untuk membatalkan instalasi';
 
     Answer := MsgBox(Msg, mbConfirmation, MB_YESNO or MB_DEFBUTTON1);
 
     if Answer = IDYES then
     begin
-      // Kill running SiManta processes first
-      Exec('taskkill', '/f /im SiMantaTeacher.exe', '', SW_HIDE, ewWaitUntilTerminated, Answer);
-      Exec('taskkill', '/f /im SiMantaStudent.exe', '', SW_HIDE, ewWaitUntilTerminated, Answer);
-      // Small delay for processes to terminate
+      Exec('taskkill', '/f /im SimantaTeacher.exe', '', SW_HIDE, ewWaitUntilTerminated, Answer);
+      Exec('taskkill', '/f /im SimantaStudent.exe', '', SW_HIDE, ewWaitUntilTerminated, Answer);
       Sleep(500);
-      // Uninstall old version silently
       UninstallOldVersion();
-      // Small delay for uninstaller to finish
       Sleep(1000);
       Result := True;
     end
@@ -246,14 +227,10 @@ var
 begin
   RoleSelected := 0; // Default: Teacher
 
-  // ════════════════════════════════════════════════
-  //  Role Selection Page (Teacher / Student)
-  // ════════════════════════════════════════════════
   RolePage := CreateCustomPage(wpSelectDir,
     'Tipe Instalasi',
-    'Pilih cara install SiManta di komputer ini.');
+    'Pilih cara install Simanta di komputer ini.');
 
-  // Header
   HeaderLabel := TLabel.Create(RolePage);
   HeaderLabel.Parent := RolePage.Surface;
   HeaderLabel.Caption := 'Pilih Mode Instalasi:';
@@ -263,7 +240,6 @@ begin
   HeaderLabel.Top := 16;
   HeaderLabel.Width := RolePage.SurfaceWidth;
 
-  // --- Teacher Radio ---
   TeacherRadio := TRadioButton.Create(RolePage);
   TeacherRadio.Parent := RolePage.Surface;
   TeacherRadio.Caption := 'Install sebagai Guru (Teacher)';
@@ -286,7 +262,6 @@ begin
   TeacherDesc.Width := RolePage.SurfaceWidth - 52;
   TeacherDesc.Font.Color := clGray;
 
-  // --- Student Radio ---
   StudentRadio := TRadioButton.Create(RolePage);
   StudentRadio.Parent := RolePage.Surface;
   StudentRadio.Caption := 'Install sebagai Murid (Student)';
@@ -309,7 +284,6 @@ begin
   StudentDesc.Width := RolePage.SurfaceWidth - 52;
   StudentDesc.Font.Color := clGray;
 
-  // Note
   DescLabel := TLabel.Create(RolePage);
   DescLabel.Parent := RolePage.Surface;
   DescLabel.Caption := 'Catatan: Hanya satu mode yang bisa diinstall per komputer.';
@@ -319,9 +293,6 @@ begin
   DescLabel.Top := 230;
   DescLabel.Width := RolePage.SurfaceWidth;
 
-  // ════════════════════════════════════════════════
-  //  Teacher IP Config (Student only)
-  // ════════════════════════════════════════════════
   TeacherIPPage := CreateInputQueryPage(RolePage.ID,
     'Konfigurasi Koneksi',
     'Konfigurasi cara Student terhubung ke Teacher.',
@@ -336,7 +307,6 @@ function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
 
-  // Save the radio selection when leaving the role page
   if CurPageID = RolePage.ID then
   begin
     if TeacherRadio.Checked then
@@ -349,7 +319,6 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  // Skip Teacher IP page if installing as Teacher (teacher doesn't need IP config)
   if PageID = TeacherIPPage.ID then
     Result := IsTeacherInstall();
 end;
@@ -361,7 +330,6 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
-    // Write config.ini for Student Agent with teacher IP
     if IsStudentInstall() then
     begin
       TeacherIP := TeacherIPPage.Values[0];
@@ -377,3 +345,4 @@ begin
     end;
   end;
 end;
+

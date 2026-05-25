@@ -1,4 +1,4 @@
-#include <QApplication>
+﻿#include <QApplication>
 #include <QIcon>
 #include <QTextStream>
 #include <QFile>
@@ -60,4 +60,5 @@ int main(int argc, char* argv[])
 
     return app.exec();
 }
+
 

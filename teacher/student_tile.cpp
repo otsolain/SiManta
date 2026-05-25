@@ -11,6 +11,9 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QMenu>
+#include <QAction>
+#include "../common/lang.h"
 
 namespace LabMonitor {
 
@@ -39,9 +42,9 @@ void StudentTile::setupUi()
     // Extra height for: hostname + username + cpuRam + appInfo row
     setFixedSize(m_thumbSize.width() + 20, m_thumbSize.height() + 90);
     m_shadowEffect = new QGraphicsDropShadowEffect(this);
-    m_shadowEffect->setBlurRadius(16);
-    m_shadowEffect->setOffset(0, 4);
-    m_shadowEffect->setColor(QColor(0, 0, 0, 80));
+    m_shadowEffect->setBlurRadius(14);
+    m_shadowEffect->setOffset(0, 2);
+    m_shadowEffect->setColor(QColor(15, 23, 42, 40));
     setGraphicsEffect(m_shadowEffect);
 
     m_layout = new QVBoxLayout(this);
@@ -65,10 +68,10 @@ void StudentTile::setupUi()
     m_screenshotLabel->setFixedSize(m_thumbSize);
     m_screenshotLabel->setAlignment(Qt::AlignCenter);
     m_screenshotLabel->setStyleSheet(QStringLiteral(
-        "QLabel { background: #E8EEF4; border: 1px solid rgba(0,60,120,0.08);"
-        " border-radius: 6px; color: %1; font-family: %2; font-size: 9pt; }"
+        "QLabel { background: #E8EEF4; border: none; border-radius: 6px;"
+        " color: %1; font-family: %2; font-size: 9pt; }"
     ).arg(Styles::Colors::TextMuted, Styles::Fonts::Family));
-    m_screenshotLabel->setText("Connecting...");
+    m_screenshotLabel->setText(Lang::get().t("Connecting...", "Menyambung..."));
 
     // App icon & badge will be added to the bottom row instead of the screenshot container
 
@@ -143,11 +146,18 @@ void StudentTile::updateScreenshot(const QPixmap& pixmap)
 {
     if (pixmap.isNull()) return;
 
+    // Any incoming frame implies the student is alive -> flip back to online.
+    if (!m_online) {
+        m_online = true;
+        updateStatusDot();
+    }
+
     m_lastPixmap = pixmap;
     QPixmap scaled = pixmap.scaled(m_thumbSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    m_screenshotLabel->setText(QString()); // clear any "Reconnecting..." text
     m_screenshotLabel->setPixmap(scaled);
     m_screenshotLabel->setStyleSheet(QStringLiteral(
-        "QLabel { background: #E8EEF4; border: 1px solid rgba(0,60,120,0.08); border-radius: 6px; }"
+        "QLabel { background: #E8EEF4; border: none; border-radius: 6px; }"
     ));
     if (m_fullscreenDialog && m_fullscreenLabel) {
         m_fullscreenDirty = true;
@@ -160,14 +170,44 @@ void StudentTile::updateScreenshot(const QPixmap& pixmap)
 void StudentTile::updateInfo(const StudentInfo& info)
 {
     m_info = info;
-    m_hostnameLabel->setText(info.hostname);
+    // If no custom display name is set, show hostname. Otherwise keep custom.
+    if (m_displayName.isEmpty()) {
+        m_hostnameLabel->setText(info.hostname);
+    } else {
+        m_hostnameLabel->setText(m_displayName);
+    }
     m_usernameLabel->setText(info.username);
+}
+
+void StudentTile::setDisplayName(const QString& name)
+{
+    QString trimmed = name.trimmed();
+    if (m_displayName == trimmed) return;
+    m_displayName = trimmed;
+    if (m_hostnameLabel) {
+        m_hostnameLabel->setText(m_displayName.isEmpty() ? m_info.hostname : m_displayName);
+    }
+    emit displayNameChanged(m_info.id, displayName());
+}
+
+QString StudentTile::displayName() const
+{
+    return m_displayName.isEmpty() ? m_info.hostname : m_displayName;
 }
 
 void StudentTile::setOnline(bool online)
 {
+    if (m_online == online) return;
     m_online = online;
     updateStatusDot();
+
+    // When we go offline, keep the last pixmap visible and just dim the status
+    // dot. Clearing the pixmap every time the watchdog flips state causes a
+    // visible flicker between the real screenshot and "Menyambung..." text.
+    // We only show the text placeholder if we actually have no frame yet.
+    if (!online && m_lastPixmap.isNull()) {
+        m_screenshotLabel->setText(Lang::get().t("Reconnecting...", "Menyambung ulang..."));
+    }
 }
 
 void StudentTile::updateStatusDot()
@@ -207,8 +247,9 @@ void StudentTile::updateSelectionStyle()
             "}"
         ).arg(Styles::Colors::CardBgSelected, Styles::Colors::CardBorderSelected));
 
-        m_shadowEffect->setBlurRadius(24);
-        m_shadowEffect->setColor(QColor(31, 111, 235, 60));
+        m_shadowEffect->setBlurRadius(20);
+        m_shadowEffect->setOffset(0, 3);
+        m_shadowEffect->setColor(QColor(31, 111, 235, 50));
     } else {
         setStyleSheet(QStringLiteral(
             "#StudentTile {"
@@ -218,9 +259,9 @@ void StudentTile::updateSelectionStyle()
             "}"
         ).arg(Styles::Colors::CardBg, Styles::Colors::CardBorder));
 
-        m_shadowEffect->setBlurRadius(16);
-        m_shadowEffect->setOffset(0, 4);
-        m_shadowEffect->setColor(QColor(0, 0, 0, 80));
+        m_shadowEffect->setBlurRadius(14);
+        m_shadowEffect->setOffset(0, 2);
+        m_shadowEffect->setColor(QColor(15, 23, 42, 40));
     }
 }
 
@@ -321,7 +362,7 @@ void StudentTile::mouseDoubleClickEvent(QMouseEvent* event)
 void StudentTile::createFullscreenDialog()
 {
     m_fullscreenDialog = new QDialog(nullptr);
-    m_fullscreenDialog->setWindowTitle(m_info.hostname + " - " + m_info.username + " [LIVE]");
+    m_fullscreenDialog->setWindowTitle(displayName() + " - " + m_info.username + " [LIVE]");
     m_fullscreenDialog->setAttribute(Qt::WA_DeleteOnClose);
     m_fullscreenDialog->setMinimumSize(800, 600);
     m_fullscreenDialog->setStyleSheet("QDialog { background: #F0F4F8; }");
@@ -340,8 +381,20 @@ void StudentTile::createFullscreenDialog()
     tbLayout->setSpacing(8);
 
     auto* studentLabel = new QLabel(
-        QStringLiteral("%1 - %2").arg(m_info.hostname, m_info.username), toolbar);
+        QStringLiteral("%1 - %2").arg(displayName(), m_info.username), toolbar);
     studentLabel->setStyleSheet("color: #1A2233; font-weight: bold; font-size: 10pt; border: none;");
+
+    // Keep the title bar and toolbar label in sync if the teacher renames
+    // this student while the fullscreen view is open.
+    connect(this, &StudentTile::displayNameChanged,
+            m_fullscreenDialog, [this, studentLabel](const QString&, const QString& newName) {
+        if (m_fullscreenDialog) {
+            m_fullscreenDialog->setWindowTitle(newName + " - " + m_info.username + " [LIVE]");
+        }
+        if (studentLabel) {
+            studentLabel->setText(QStringLiteral("%1 - %2").arg(newName, m_info.username));
+        }
+    });
 
     auto createZoomBtn = [&](const QString& text, const QString& tooltip) {
         auto* btn = new QPushButton(text, toolbar);
@@ -451,15 +504,43 @@ void StudentTile::updateFullscreenView()
 
 void StudentTile::contextMenuEvent(QContextMenuEvent* event)
 {
+    QMenu menu(this);
+    menu.setStyleSheet(
+        "QMenu { background:#FFFFFF; color:#1E293B; border:1px solid #CBD5E1;"
+        " border-radius:8px; padding:4px; }"
+        "QMenu::item { padding:8px 24px 8px 16px; border-radius:6px; }"
+        "QMenu::item:selected { background:#E8F0FE; color:#1A73E8; }"
+        "QMenu::separator { height:1px; background:#E2E8F0; margin:4px 6px; }"
+    );
+
+    QAction* renameAct = menu.addAction(
+        Lang::get().t("Rename this computer...", "Ubah nama komputer ini..."));
+    menu.addSeparator();
+    QAction* clearAct = nullptr;
+    if (!m_displayName.isEmpty()) {
+        clearAct = menu.addAction(
+            Lang::get().t("Reset to hostname", "Kembalikan ke nama host"));
+    }
+
+    QAction* chosen = menu.exec(event->globalPos());
+    if (!chosen) return;
+
+    if (chosen == renameAct) {
+        emit renameRequested(m_info.id);
+    } else if (clearAct && chosen == clearAct) {
+        setDisplayName(QString());
+        emit renameCleared(m_info.id);
+    }
+
     emit contextMenuRequested(m_info.id, event->globalPos());
 }
 
 void StudentTile::enterEvent(QEnterEvent* event)
 {
     Q_UNUSED(event)
-    m_shadowEffect->setBlurRadius(24);
-    m_shadowEffect->setOffset(0, 6);
-    m_shadowEffect->setColor(QColor(0, 0, 0, 120));
+    m_shadowEffect->setBlurRadius(20);
+    m_shadowEffect->setOffset(0, 3);
+    m_shadowEffect->setColor(QColor(15, 23, 42, 70));
 
     if (!m_selected) {
         setStyleSheet(QStringLiteral(
@@ -475,9 +556,9 @@ void StudentTile::enterEvent(QEnterEvent* event)
 void StudentTile::leaveEvent(QEvent* event)
 {
     Q_UNUSED(event)
-    m_shadowEffect->setBlurRadius(16);
-    m_shadowEffect->setOffset(0, 4);
-    m_shadowEffect->setColor(QColor(0, 0, 0, 80));
+    m_shadowEffect->setBlurRadius(14);
+    m_shadowEffect->setOffset(0, 2);
+    m_shadowEffect->setColor(QColor(15, 23, 42, 40));
 
     updateSelectionStyle();
 }

@@ -31,6 +31,8 @@
 #include <QTimer>
 #include <QTime>
 #include <QSystemTrayIcon>
+#include <QSet>
+#include <QAbstractNativeEventFilter>
 #include <QMenu>
 #include <QAction>
 #include <QInputDialog>
@@ -85,6 +87,164 @@ protected:
 
 static PacServer* g_pacServer = nullptr;
 static LabMonitor::StudentAgent* g_agent = nullptr;
+
+// Set to true when the OS is shutting down / logging off / app is quitting
+// for a legitimate reason. Used by LockOverlay and StudentPanel to allow
+// themselves to be closed so Windows can finish its shutdown cleanly instead
+// of showing "This app is preventing shutdown" for every window.
+static bool g_shuttingDown = false;
+
+// -- Local TCP "blackhole" proxy on 127.0.0.1:9999 --
+// When the PAC file routes non-whitelisted traffic to "PROXY 127.0.0.1:9999",
+// this server accepts the connection and immediately closes it, giving the
+// browser a fast, deterministic "connection refused" instead of a long hang.
+class BlackholeProxy : public QTcpServer {
+public:
+    explicit BlackholeProxy(QObject* parent = nullptr) : QTcpServer(parent) {}
+protected:
+    void incomingConnection(qintptr sd) override {
+        QTcpSocket* s = new QTcpSocket(this);
+        s->setSocketDescriptor(sd);
+        // Write a minimal HTTP 403 so the user sees something if the browser
+        // decided to try to read from this "proxy".
+        const QByteArray msg =
+            "HTTP/1.1 403 Forbidden\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "Content-Length: 94\r\n"
+            "Connection: close\r\n\r\n"
+            "<html><body><h2>Blocked by Simanta</h2>"
+            "<p>This site is not in the whitelist.</p></body></html>";
+        s->write(msg);
+        s->flush();
+        s->disconnectFromHost();
+        connect(s, &QTcpSocket::disconnected, s, &QTcpSocket::deleteLater);
+    }
+};
+static BlackholeProxy* g_blackholeProxy = nullptr;
+
+// -- Firewall rule helpers -------------------------------------------------
+// We use Windows Advanced Firewall (netsh) to cut off QUIC/HTTP3 traffic that
+// bypasses PAC/HTTP proxying, and optionally block raw TCP too when
+// "Block All Internet" is active. Rules are tagged so we can remove them later.
+static const char* FW_RULE_QUIC = "Simanta Block QUIC";
+static const char* FW_RULE_TCP  = "Simanta Block TCP";
+
+static void fw_addQuicBlock() {
+    // Block outbound UDP 443 (HTTP/3 / QUIC) for everyone on the machine.
+    // This forces browsers to fall back to TCP which the PAC can then route.
+    QProcess::startDetached("netsh", {
+        "advfirewall", "firewall", "add", "rule",
+        QStringLiteral("name=%1").arg(FW_RULE_QUIC),
+        "dir=out", "action=block", "protocol=UDP", "remoteport=443", "enable=yes"
+    });
+    // Also block UDP 80 for completeness (uncommon HTTP/3 fallback).
+    QProcess::startDetached("netsh", {
+        "advfirewall", "firewall", "add", "rule",
+        QStringLiteral("name=%1").arg(FW_RULE_QUIC),
+        "dir=out", "action=block", "protocol=UDP", "remoteport=80", "enable=yes"
+    });
+}
+
+static void fw_removeQuicBlock() {
+    QProcess::startDetached("netsh", {
+        "advfirewall", "firewall", "delete", "rule",
+        QStringLiteral("name=%1").arg(FW_RULE_QUIC)
+    });
+}
+
+static void fw_addTcpBlock() {
+    // Block outbound TCP 80/443 for a hard "no internet at all" stance.
+    QProcess::startDetached("netsh", {
+        "advfirewall", "firewall", "add", "rule",
+        QStringLiteral("name=%1").arg(FW_RULE_TCP),
+        "dir=out", "action=block", "protocol=TCP", "remoteport=80,443", "enable=yes"
+    });
+}
+
+static void fw_removeTcpBlock() {
+    QProcess::startDetached("netsh", {
+        "advfirewall", "firewall", "delete", "rule",
+        QStringLiteral("name=%1").arg(FW_RULE_TCP)
+    });
+}
+
+// -- Browser policy enforcement ------------------------------------------
+// Some students "escape" Internet Access Control because:
+//   1) Chrome/Edge has DNS-over-HTTPS (DoH) ON, which uses UDP 443 to a
+//      remote resolver (Cloudflare/Google) and bypasses the system PAC for
+//      the DNS step. Once the IP is known, HTTP/3 over QUIC sneaks past as
+//      well.
+//   2) Firefox keeps its own proxy setting (Settings -> Network -> Proxy
+//      "No proxy") and ignores Windows AutoConfigURL by default.
+//   3) Brave / Vivaldi / Opera respect Chrome policy keys but only when the
+//      relevant HKLM keys exist.
+//   4) Some browsers cache "use system proxy" flag at startup -- they need
+//      to be (re)started after policy is pushed.
+//
+// We push a small set of registry policies that:
+//   - Disable DoH globally (Chrome, Edge, Firefox).
+//   - Force "use system proxy" for Chrome family + Firefox.
+//   - Disable QUIC in Chrome family (defense in depth on top of the firewall
+//     rule that already blocks UDP 443).
+//
+// The policies survive browser reinstalls and apply on next browser start.
+static void browserPolicy_apply() {
+    QProcess::startDetached("powershell", {"-Command",
+        // Chrome (and Brave/Vivaldi via Chromium policy)
+        "$ck='HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'; "
+        "New-Item -Path $ck -Force | Out-Null; "
+        "Set-ItemProperty -Path $ck -Name 'DnsOverHttpsMode' -Value 'off' -Type String -Force; "
+        "Set-ItemProperty -Path $ck -Name 'QuicAllowed' -Value 0 -Type DWord -Force; "
+        "Set-ItemProperty -Path $ck -Name 'ProxySettings' -Value '{\"ProxyMode\":\"system\"}' -Type String -Force; "
+        // Edge
+        "$ek='HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge'; "
+        "New-Item -Path $ek -Force | Out-Null; "
+        "Set-ItemProperty -Path $ek -Name 'DnsOverHttpsMode' -Value 'off' -Type String -Force; "
+        "Set-ItemProperty -Path $ek -Name 'QuicAllowed' -Value 0 -Type DWord -Force; "
+        "Set-ItemProperty -Path $ek -Name 'ProxySettings' -Value '{\"ProxyMode\":\"system\"}' -Type String -Force; "
+        // Brave
+        "$bk='HKLM:\\SOFTWARE\\Policies\\BraveSoftware\\Brave'; "
+        "New-Item -Path $bk -Force | Out-Null; "
+        "Set-ItemProperty -Path $bk -Name 'DnsOverHttpsMode' -Value 'off' -Type String -Force; "
+        "Set-ItemProperty -Path $bk -Name 'QuicAllowed' -Value 0 -Type DWord -Force; "
+        // Firefox: force system proxy + disable DoH (TRR)
+        "$fk='HKLM:\\SOFTWARE\\Policies\\Mozilla\\Firefox'; "
+        "New-Item -Path $fk -Force | Out-Null; "
+        "Set-ItemProperty -Path $fk -Name 'DNSOverHTTPS' -Value '{\"Enabled\":false,\"Locked\":true}' -Type String -Force; "
+        "$fp='HKLM:\\SOFTWARE\\Policies\\Mozilla\\Firefox\\Proxy'; "
+        "New-Item -Path $fp -Force | Out-Null; "
+        "Set-ItemProperty -Path $fp -Name 'Mode' -Value 'system' -Type String -Force; "
+        "Set-ItemProperty -Path $fp -Name 'Locked' -Value 1 -Type DWord -Force"
+    });
+}
+
+static void browserPolicy_remove() {
+    // Remove ONLY the specific values Simanta sets, never the whole policy
+    // key. Other software (corp Chrome policy, antivirus, parental controls)
+    // may store unrelated values in the same keys -- a Recurse delete here
+    // would silently break them.
+    QProcess::startDetached("powershell", {"-Command",
+        // Chrome
+        "$ck='HKLM:\\SOFTWARE\\Policies\\Google\\Chrome'; "
+        "Remove-ItemProperty -Path $ck -Name 'DnsOverHttpsMode' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path $ck -Name 'QuicAllowed'      -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path $ck -Name 'ProxySettings'    -ErrorAction SilentlyContinue; "
+        // Edge
+        "$ek='HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge'; "
+        "Remove-ItemProperty -Path $ek -Name 'DnsOverHttpsMode' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path $ek -Name 'QuicAllowed'      -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path $ek -Name 'ProxySettings'    -ErrorAction SilentlyContinue; "
+        // Brave
+        "$bk='HKLM:\\SOFTWARE\\Policies\\BraveSoftware\\Brave'; "
+        "Remove-ItemProperty -Path $bk -Name 'DnsOverHttpsMode' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path $bk -Name 'QuicAllowed'      -ErrorAction SilentlyContinue; "
+        // Firefox: DNSOverHTTPS is a value on the parent key; the Proxy
+        // subkey is fully ours so it's safe to drop the whole subkey.
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Mozilla\\Firefox' -Name 'DNSOverHTTPS' -ErrorAction SilentlyContinue; "
+        "Remove-Item         -Path 'HKLM:\\SOFTWARE\\Policies\\Mozilla\\Firefox\\Proxy' -Recurse -ErrorAction SilentlyContinue"
+    });
+}
+
 static const char* DIALOG_STYLE = R"(
     QDialog {
         background-color: #F0F4F8;
@@ -113,6 +273,110 @@ static const char* DIALOG_STYLE = R"(
     }
 )";
 
+void resetAllRestrictions() {
+    // Guard: don't spawn child processes while Windows is shutting down /
+    // logging off. The session is already torn down at that point and
+    // CreateProcess fails with "netsh.exe - Application Error: cannot start"
+    // dialogs that block Windows from completing shutdown.
+    if (g_shuttingDown) {
+        QTextStream(stdout) << "[lab-student] System shutting down, skipping async restriction reset\n";
+        return;
+    }
+    QTextStream(stdout) << "[lab-student] Auto-unblocking all restrictions...\n";
+    if (g_pacServer) g_pacServer->currentPacContent = "";
+    // Remove our firewall rules so QUIC/TCP traffic is free again.
+    fw_removeQuicBlock();
+    fw_removeTcpBlock();
+    // Remove browser policy hardening so DoH / Firefox-proxy work normally.
+    browserPolicy_remove();
+    QProcess::startDetached("powershell", {"-Command", 
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'EnableLegacyAutoProxyFeatures' -ErrorAction SilentlyContinue; "
+        "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxyEnable' -Value 0 -Type DWord -Force; "
+        "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxyEnable' -Value 0 -PropertyType DWord -Force; "
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'AutoConfigURL' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'AutoConfigURL' -ErrorAction SilentlyContinue"
+    });
+    QTimer::singleShot(500, []() { refreshWindowsProxy(); });
+
+    QProcess::startDetached("powershell", {"-Command", 
+        "Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3 -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -ErrorAction SilentlyContinue"
+    });
+}
+
+void resetAllRestrictionsSync() {
+    if (g_shuttingDown) {
+        QTextStream(stdout) << "[lab-student] System shutting down, skipping sync restriction reset\n";
+        return;
+    }
+    QTextStream(stdout) << "[lab-student] Auto-unblocking all restrictions (sync)...\n";
+    if (g_pacServer) g_pacServer->currentPacContent = "";
+    // Remove firewall rules synchronously so uninstall/exit leaves no trace.
+    {
+        QProcess p;
+        p.start("netsh", {
+            "advfirewall", "firewall", "delete", "rule",
+            QStringLiteral("name=%1").arg(FW_RULE_QUIC)
+        });
+        p.waitForFinished(3000);
+    }
+    {
+        QProcess p;
+        p.start("netsh", {
+            "advfirewall", "firewall", "delete", "rule",
+            QStringLiteral("name=%1").arg(FW_RULE_TCP)
+        });
+        p.waitForFinished(3000);
+    }
+    // Synchronously remove browser policies on shutdown / uninstall.
+    // Use targeted value removal so we don't nuke other software's policy.
+    {
+        QProcess pp;
+        pp.start("powershell", {"-Command",
+            "$keys=@("
+            "'HKLM:\\SOFTWARE\\Policies\\Google\\Chrome',"
+            "'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge',"
+            "'HKLM:\\SOFTWARE\\Policies\\BraveSoftware\\Brave'); "
+            "foreach($k in $keys){ "
+            "Remove-ItemProperty -Path $k -Name 'DnsOverHttpsMode' -ErrorAction SilentlyContinue; "
+            "Remove-ItemProperty -Path $k -Name 'QuicAllowed' -ErrorAction SilentlyContinue; "
+            "Remove-ItemProperty -Path $k -Name 'ProxySettings' -ErrorAction SilentlyContinue }; "
+            "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Mozilla\\Firefox' -Name 'DNSOverHTTPS' -ErrorAction SilentlyContinue; "
+            "Remove-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Mozilla\\Firefox\\Proxy' -Recurse -ErrorAction SilentlyContinue"
+        });
+        pp.waitForFinished(3000);
+    }
+    QProcess p;
+    p.start("powershell", {"-Command", 
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'EnableLegacyAutoProxyFeatures' -ErrorAction SilentlyContinue; "
+        "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxyEnable' -Value 0 -Type DWord -Force; "
+        "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxyEnable' -Value 0 -PropertyType DWord -Force; "
+        "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'AutoConfigURL' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'AutoConfigURL' -ErrorAction SilentlyContinue"
+    });
+    p.waitForFinished();
+    refreshWindowsProxy();
+
+    QProcess p2;
+    p2.start("powershell", {"-Command", 
+        "Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3 -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -ErrorAction SilentlyContinue; "
+        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -ErrorAction SilentlyContinue"
+    });
+    p2.waitForFinished();
+}
+
 void signalHandler(int signal)
 {
     Q_UNUSED(signal)
@@ -122,6 +386,15 @@ void signalHandler(int signal)
     }
     QCoreApplication::quit();
 }
+static HHOOK g_keyboardHook = nullptr;
+
+LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        return 1; // Block all keyboard input system-wide when locked
+    }
+    return CallNextHookEx(g_keyboardHook, nCode, wParam, lParam);
+}
+
 class LockOverlay : public QWidget
 {
 public:
@@ -130,6 +403,10 @@ public:
         setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
         setAttribute(Qt::WA_ShowWithoutActivating, false);
         setCursor(Qt::BlankCursor);
+    }
+
+    ~LockOverlay() {
+        deactivate();
     }
 
     void activate()
@@ -142,10 +419,17 @@ public:
         raise();
         activateWindow();
         setFocus();
+        if (!g_keyboardHook) {
+            g_keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+        }
     }
 
     void deactivate()
     {
+        if (g_keyboardHook) {
+            UnhookWindowsHookEx(g_keyboardHook);
+            g_keyboardHook = nullptr;
+        }
         hide();
     }
 
@@ -191,12 +475,16 @@ protected:
         p.setFont(titleFont);
         p.setPen(QColor("#E6EDF3"));
         QRect titleRect(0, height()/2 - 20, width(), 50);
-        p.drawText(titleRect, Qt::AlignCenter, "Screen Locked");
+        p.drawText(titleRect, Qt::AlignCenter,
+            Lang::get().t("Screen Locked", "Layar Dikunci"));
         QFont subFont("Segoe UI", 13);
         p.setFont(subFont);
         p.setPen(QColor(230, 237, 243, 140));
         QRect subRect(0, height()/2 + 40, width(), 60);
-        p.drawText(subRect, Qt::AlignCenter, "Your screen has been locked by the teacher.\nPlease wait for instructions.");
+        p.drawText(subRect, Qt::AlignCenter,
+            Lang::get().t(
+                "Your screen has been locked by the teacher.\nPlease wait for instructions.",
+                "Layar Anda dikunci oleh guru.\nSilakan tunggu instruksi."));
         QFont brandFont("Segoe UI", 9);
         p.setFont(brandFont);
         p.setPen(QColor(255, 255, 255, 60));
@@ -209,6 +497,7 @@ protected:
     }
 
     void closeEvent(QCloseEvent* e) override {
+        if (g_shuttingDown) { e->accept(); return; }
         e->ignore(); // Prevent closing
     }
 
@@ -235,7 +524,7 @@ public:
         layout->setSpacing(0);
         layout->setContentsMargins(0, 0, 0, 0);
 
-        // ── Header bar (Modern Clean) ──
+        // -- Header bar (Modern Clean) --
         auto* headerBar = new QWidget(this);
         headerBar->setFixedHeight(68);
         headerBar->setStyleSheet("background: #FFFFFF; border-bottom: 1px solid #E2E8F0;");
@@ -264,7 +553,7 @@ public:
         hdrLayout->addWidget(avatar);
         hdrLayout->addLayout(nameCol, 1);
 
-        // ── Chat area (QScrollArea) ──
+        // -- Chat area (QScrollArea) --
         m_chatScroll = new QScrollArea(this);
         m_chatScroll->setWidgetResizable(true);
         m_chatScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -281,7 +570,7 @@ public:
         m_chatLayout->addStretch();
         m_chatScroll->setWidget(m_chatContainer);
 
-        // ── Input area ──
+        // -- Input area --
         auto* inputBar = new QWidget(this);
         inputBar->setFixedHeight(72);
         inputBar->setStyleSheet("background: #FFFFFF; border-top: 1px solid #E2E8F0;");
@@ -417,7 +706,7 @@ public:
         setFixedWidth(300); // Reset width since shadow margins are removed
         setStyleSheet("StudentPanel { background: rgba(0,0,0,0); border: 0px solid transparent; margin: 0px; padding: 0px; }");
 
-        // ── Main container ──
+        // -- Main container --
         m_container = new QFrame(this);
         m_container->setStyleSheet(
             "QFrame#PanelContainer {"
@@ -434,15 +723,25 @@ public:
         mainLayout->setContentsMargins(0, 0, 0, 0);
         mainLayout->setSpacing(0);
 
+        // Header: clicking anywhere on it toggles the expanded state.
+        // We lay it out as a plain QWidget and install an event filter that
+        // forwards mouse release events to the same toggleExpanded() slot
+        // the old "+/-" button used to call.
         auto* headerWidget = new QWidget(m_container);
-        headerWidget->setStyleSheet("background: transparent;");
+        headerWidget->setObjectName("PanelHeader");
+        headerWidget->setStyleSheet(
+            "#PanelHeader { background: transparent; }"
+            "#PanelHeader:hover { background: rgba(15,23,42,0.03); }");
         headerWidget->setCursor(Qt::PointingHandCursor);
+        headerWidget->installEventFilter(this);
+        m_headerWidget = headerWidget;
+
         auto* headerLayout = new QHBoxLayout(headerWidget);
-        headerLayout->setContentsMargins(18, 12, 14, 12); // Pushed back to the left with safe padding
+        headerLayout->setContentsMargins(18, 12, 18, 12);
         headerLayout->setSpacing(10);
 
         m_monitorDot = new QLabel(headerWidget);
-        m_monitorDot->setFixedSize(14, 14); // Slightly larger
+        m_monitorDot->setFixedSize(14, 14);
         m_monitorDot->setStyleSheet(
             "QLabel { background: #3FB950; border-radius: 7px; border: none; }");
 
@@ -450,15 +749,6 @@ public:
         m_statusLabel->setStyleSheet(
             "QLabel { color: #1E293B; font-size: 9pt; font-weight: 600;"
             " background: transparent; border: none; }");
-
-        m_expandBtn = new QPushButton(headerWidget);
-        m_expandBtn->setFixedSize(28, 28);
-        m_expandBtn->setText("-");
-        m_expandBtn->setStyleSheet(
-            "QPushButton { background: #F1F5F9; color: #64748B;"
-            " border-radius: 14px; font-size: 14pt; border: none; font-weight: bold; padding-bottom: 2px; }"
-            "QPushButton:hover { background: #E2E8F0; color: #0F172A; }");
-        m_expandBtn->setCursor(Qt::PointingHandCursor);
 
         // Unread badge on header
         m_unreadBadge = new QLabel(headerWidget);
@@ -472,7 +762,6 @@ public:
         headerLayout->addWidget(m_monitorDot);
         headerLayout->addWidget(m_statusLabel, 1);
         headerLayout->addWidget(m_unreadBadge);
-        headerLayout->addWidget(m_expandBtn);
 
         m_bodyWidget = new QWidget(m_container);
         m_bodyWidget->setStyleSheet("background: transparent;");
@@ -482,7 +771,7 @@ public:
 
         // Monitor text strip removed as requested
 
-        // ── Action Buttons ──
+        // -- Action Buttons --
         m_actionsLabel = new QLabel(Lang::get().t("Quick Actions", "Aksi Cepat"), m_bodyWidget);
         m_actionsLabel->setStyleSheet(
             "QLabel { color: #64748B; font-size: 8pt; font-weight: 600;"
@@ -551,13 +840,13 @@ public:
         mainLayout->addWidget(headerWidget);
         mainLayout->addWidget(m_bodyWidget);
 
-        // ── Container layout in this widget ──
+        // -- Container layout in this widget --
         auto* wLayout = new QVBoxLayout(this);
         wLayout->setContentsMargins(0, 0, 0, 0); // No margins needed without shadow
         wLayout->addWidget(m_container);
 
-        // ── Connections ──
-        connect(m_expandBtn, &QPushButton::clicked, this, &StudentPanel::toggleExpanded);
+        // -- Connections --
+        // (Header is now the click target; no dedicated expand button.)
 
         connect(m_chatBtn, &QPushButton::clicked, this, [this]() {
             if (m_chatWindow) {
@@ -570,19 +859,21 @@ public:
         });
 
         connect(m_helpBtn, &QPushButton::clicked, this, [this]() {
-            sendQuickRequest("Need help");
+            // Send a language-neutral token so the teacher translates the
+            // notification in the teacher's current UI language.
+            sendQuickRequest("__REQ_NEED_HELP__");
         });
 
         connect(m_questionBtn, &QPushButton::clicked, this, [this]() {
-            sendQuickRequest("Have a question");
+            sendQuickRequest("__REQ_HAVE_QUESTION__");
         });
 
         connect(m_toiletBtn, &QPushButton::clicked, this, [this]() {
-            sendQuickRequest("Going to toilet");
+            sendQuickRequest("__REQ_TOILET__");
         });
 
         connect(m_doneBtn, &QPushButton::clicked, this, [this]() {
-            sendQuickRequest("Finished the assignment");
+            sendQuickRequest("__REQ_FINISHED__");
         });
 
         updateLayout();
@@ -666,7 +957,37 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* e) override {
-        e->ignore(); // Prevent closing — panel must stay visible
+        if (g_shuttingDown) { e->accept(); return; }
+        e->ignore(); // Prevent closing -  panel must stay visible
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        // Header acts as a single click target to toggle expand/collapse,
+        // matching the new design without a separate +/- button.
+        if (watched == m_headerWidget) {
+            if (event->type() == QEvent::MouseButtonPress) {
+                auto* me = static_cast<QMouseEvent*>(event);
+                if (me->button() == Qt::LeftButton) {
+                    m_headerPressPos = me->globalPosition().toPoint();
+                    m_headerPressed = true;
+                    // Do not consume the event - let the parent drag handlers run.
+                }
+            } else if (event->type() == QEvent::MouseButtonRelease) {
+                auto* me = static_cast<QMouseEvent*>(event);
+                if (me->button() == Qt::LeftButton && m_headerPressed) {
+                    m_headerPressed = false;
+                    QPoint delta = me->globalPosition().toPoint() - m_headerPressPos;
+                    // Only treat as a click if the mouse barely moved - real
+                    // drags produce big deltas and must NOT toggle collapse.
+                    if (delta.manhattanLength() < 6
+                        && m_headerWidget->rect().contains(me->pos())) {
+                        toggleExpanded();
+                        return true;
+                    }
+                }
+            }
+        }
+        return QWidget::eventFilter(watched, event);
     }
 
     void paintEvent(QPaintEvent*) override {
@@ -688,6 +1009,10 @@ protected:
         if (m_dragging && (e->buttons() & Qt::LeftButton)) {
             move(e->globalPosition().toPoint() - m_dragStartPos);
             m_manuallyPositioned = true;
+            // User dragged the panel, so any previously saved "before expand"
+            // position is no longer relevant. Forget it so the next collapse
+            // doesn't snap the panel back to the pre-drag location.
+            m_hasPreExpandPos = false;
             e->accept();
         }
     }
@@ -708,30 +1033,60 @@ private slots:
 
         m_expanded = !m_expanded;
         m_bodyWidget->setVisible(m_expanded);
-        m_expandBtn->setText(m_expanded ? "-" : "+");
         updateLayout();
 
-        // After resizing, ensure the panel stays within screen bounds
-        // and pin to bottom if it was in the lower half of the screen
+        // Keep the panel anchored wherever the user left it. The only times
+        // we adjust position are:
+        //   (a) expanding near the bottom would push the panel off-screen
+        //       -> pin its bottom edge so it stays fully visible,
+        //   (b) expanding near the top would push the header off-screen
+        //       -> clamp to the top.
+        // Collapsing restores the exact position the panel had before the
+        // preceding expand, so dragging to the bottom + expand + collapse
+        // returns the panel to the bottom where the user left it.
         QScreen* screen = QGuiApplication::primaryScreen();
-        if (screen) {
-            QRect geo = screen->availableGeometry();
-            
-            if (oldPos.y() + oldHeight > geo.center().y()) {
-                // Pin bottom
-                int newY = oldPos.y() + oldHeight - height();
-                move(oldPos.x(), newY);
-            }
-            
-            QPoint p = pos();
-            // Clamp: don't go below the bottom of the screen
-            if (p.y() + height() > geo.bottom())
+        if (!screen) return;
+        QRect geo = screen->availableGeometry();
+
+        bool expanding = m_expanded && height() > oldHeight;
+        QPoint p = oldPos;
+
+        if (expanding) {
+            // Remember where we were before expansion so collapse can restore
+            // it (e.g. user placed panel at bottom, expand pushed it up to
+            // fit, collapse should put it back at the bottom).
+            m_preExpandPos = oldPos;
+            m_hasPreExpandPos = true;
+
+            // Only re-pin if expansion makes the panel leave the screen.
+            if (p.y() + height() > geo.bottom()) {
                 p.setY(geo.bottom() - height());
-            // Clamp: don't go above the top
-            if (p.y() < geo.top())
+            }
+            if (p.y() < geo.top()) {
                 p.setY(geo.top());
-            if (p != pos())
-                move(p);
+            }
+        } else if (!m_expanded && m_hasPreExpandPos) {
+            // Collapsing: restore the pre-expand position as long as it still
+            // fits on screen (screen size or panel size might have changed).
+            QPoint restored = m_preExpandPos;
+            if (restored.y() + height() > geo.bottom()) {
+                restored.setY(geo.bottom() - height());
+            }
+            if (restored.y() < geo.top()) {
+                restored.setY(geo.top());
+            }
+            if (restored.x() + width() > geo.right()) {
+                restored.setX(geo.right() - width());
+            }
+            if (restored.x() < geo.left()) {
+                restored.setX(geo.left());
+            }
+            p = restored;
+            m_hasPreExpandPos = false;
+        }
+
+        if (p != pos()) {
+            move(p);
         }
     }
 
@@ -781,7 +1136,7 @@ private:
     QLabel* m_statusLabel;
     QLabel* m_unreadBadge;
     QLabel* m_connInfoLabel;
-    QPushButton* m_expandBtn;
+    QWidget* m_headerWidget;
     QWidget* m_bodyWidget;
     QPushButton* m_chatBtn;
     QLabel* m_actionsLabel;
@@ -795,7 +1150,14 @@ private:
     QTimer* m_visibilityTimer;
     bool m_dragging;
     QPoint m_dragStartPos;
+    QPoint m_headerPressPos;
+    bool m_headerPressed = false;
     bool m_manuallyPositioned;
+    // Saved panel position BEFORE the most recent expand. Used by
+    // toggleExpanded() to restore the panel to where the user left it when
+    // the body collapses again.
+    QPoint m_preExpandPos;
+    bool m_hasPreExpandPos = false;
 };
 
 class FileTransferPopup : public QWidget
@@ -839,9 +1201,9 @@ public:
             " font-weight: bold; border: none; }"
         );
         iconLabel->setAlignment(Qt::AlignCenter);
-        iconLabel->setText(QString::fromUtf8("\u2193")); // down arrow ↓
+        iconLabel->setText(QString::fromUtf8("\u2193")); // down arrow ->
 
-        m_titleLabel = new QLabel("Receiving file...", container);
+        m_titleLabel = new QLabel(Lang::get().t("Receiving file...", "Menerima file..."), container);
         m_titleLabel->setStyleSheet(
             "QLabel { color: #E6EDF3; font-size: 11pt; font-weight: bold; border: none; background: transparent; }");
 
@@ -880,7 +1242,9 @@ public:
 
     void showTransfer(const QString& fileName, qint64 fileSize, bool isFolder)
     {
-        m_titleLabel->setText(isFolder ? "Receiving folder from Teacher..." : "Receiving file from Teacher...");
+        m_titleLabel->setText(isFolder
+            ? Lang::get().t("Receiving folder from Teacher...", "Menerima folder dari Guru...")
+            : Lang::get().t("Receiving file from Teacher...",   "Menerima file dari Guru..."));
         QString sizeStr;
         if (fileSize < 1024) sizeStr = QString::number(fileSize) + " B";
         else if (fileSize < 1048576) sizeStr = QString::number(fileSize / 1024) + " KB";
@@ -915,10 +1279,14 @@ public:
 
     void showComplete(const QString& fileName, bool isFolder)
     {
-        m_titleLabel->setText(isFolder ? "Folder received!" : "File received!");
-        m_fileNameLabel->setText(QStringLiteral("Saved to Downloads/SiManta/%1").arg(fileName));
+        m_titleLabel->setText(isFolder
+            ? Lang::get().t("Folder received!", "Folder diterima!")
+            : Lang::get().t("File received!",   "File diterima!"));
+        m_fileNameLabel->setText(
+            Lang::get().t(QStringLiteral("Saved to Downloads/Simanta/%1").arg(fileName),
+                          QStringLiteral("Disimpan ke Downloads/Simanta/%1").arg(fileName)));
         m_progressBar->setValue(100);
-        m_percentLabel->setText(QString::fromUtf8("\u2713")); // ✓
+        m_percentLabel->setText(QString::fromUtf8("\u2713")); // OK
         m_progressBar->setStyleSheet(
             "QProgressBar { background: #21262D; border: none; border-radius: 3px; }"
             "QProgressBar::chunk { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
@@ -951,7 +1319,7 @@ static QDialog* createStyledMessageDialog(const QString& title, const QString& b
                                            const QString& sender)
 {
     auto* dialog = new QDialog();
-    dialog->setWindowTitle("Message from Teacher");
+    dialog->setWindowTitle(Lang::get().t("Message from Teacher", "Pesan dari Guru"));
     dialog->setWindowFlags(dialog->windowFlags() | Qt::WindowStaysOnTopHint);
     dialog->setMinimumSize(480, 300);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -1012,13 +1380,45 @@ static QDialog* createStyledMessageDialog(const QString& title, const QString& b
 
 int main(int argc, char* argv[])
 {
-    // Force light title bars — ignore Windows 11 dark mode
+    // Force light title bars -  ignore Windows 11 dark mode
     qputenv("QT_QPA_PLATFORM", "windows:darkmode=0");
 
     QApplication app(argc, argv);
-    app.setApplicationName("simanta-student");
+    app.setApplicationName("Simanta-student");
     app.setApplicationVersion("");
     app.setOrganizationName("Simanta");
+
+    // -- Native event filter to detect Windows shutdown/logoff. --
+    // When the user picks Shutdown/Restart/Sign-out, Windows sends
+    // WM_QUERYENDSESSION and WM_ENDSESSION to every top-level window. By
+    // flipping g_shuttingDown to true here, our LockOverlay / StudentPanel
+    // stop refusing their close events so the OS can tear us down cleanly
+    // instead of showing "This app is preventing shutdown" repeatedly.
+    class ShutdownFilter : public QAbstractNativeEventFilter {
+    public:
+        bool nativeEventFilter(const QByteArray& eventType, void* message, qintptr*) override {
+            if (eventType == "windows_generic_MSG" || eventType == "windows_dispatcher_MSG") {
+                MSG* msg = static_cast<MSG*>(message);
+                if (msg->message == WM_QUERYENDSESSION || msg->message == WM_ENDSESSION
+                    || msg->message == WM_CLOSE) {
+                    // WM_CLOSE by itself doesn't mean shutdown, but if Windows
+                    // is asking us to close every window in rapid succession
+                    // it's safest to allow them to close. We only set the
+                    // flag on ENDSESSION-family messages.
+                    if (msg->message != WM_CLOSE) {
+                        g_shuttingDown = true;
+                    }
+                }
+            }
+            return false;
+        }
+    };
+    static ShutdownFilter s_shutdownFilter;
+    app.installNativeEventFilter(&s_shutdownFilter);
+
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [](){
+        g_shuttingDown = true;
+    });
     
     // Set application icon using .ico for proper Windows taskbar scaling
     QString icoPath = QCoreApplication::applicationDirPath() + "/logo.ico";
@@ -1030,7 +1430,7 @@ int main(int argc, char* argv[])
     HANDLE hMutex = CreateMutexW(NULL, TRUE, L"Global\\SimantaStudentMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hMutex);
-        // Silently exit — don't show message box (might block auto-start)
+        // Silently exit -  don't show message box (might block auto-start)
         return 1;
     }
 
@@ -1130,11 +1530,11 @@ int main(int argc, char* argv[])
         studentPanel.setConnected(false);  // will show "Menghubungkan..."
     }
 
-    // ════════════════════════════════════════════════════════
-    // System Tray Icon — student can initiate chat & help
-    // ════════════════════════════════════════════════════════
+    // ========================================================
+    // System Tray Icon -  student can initiate chat & help
+    // ========================================================
     QSystemTrayIcon trayIcon;
-    trayIcon.setToolTip("Simanta Student - Connecting...");
+    trayIcon.setToolTip(Lang::get().t("Simanta Student - Connecting...", "Simanta Siswa - Menyambung..."));
 
     // Use app icon if available, otherwise create a simple colored icon
     QPixmap trayPx(32, 32);
@@ -1152,37 +1552,41 @@ int main(int argc, char* argv[])
     trayIcon.setIcon(QIcon(trayPx));
 
     QMenu trayMenu;
-    auto* chatAction = trayMenu.addAction("Chat with Teacher");
-    auto* helpAction = trayMenu.addAction("Request Help");
+    auto* chatAction = trayMenu.addAction(Lang::get().t("Chat with Teacher", "Chat dengan Guru"));
+    auto* helpAction = trayMenu.addAction(Lang::get().t("Request Help", "Minta Bantuan"));
     trayMenu.addSeparator();
-    auto* panelAction = trayMenu.addAction("Show Panel");
-    auto* statusAction = trayMenu.addAction("Status: Connecting...");
+    auto* panelAction = trayMenu.addAction(Lang::get().t("Show Panel", "Tampilkan Panel"));
+    auto* statusAction = trayMenu.addAction(Lang::get().t("Status: Connecting...", "Status: Menyambung..."));
     statusAction->setEnabled(false);
     trayIcon.setContextMenu(&trayMenu);
     trayIcon.show();
 
-    // Chat action — open chat window
+    // Chat action -  open chat window
     QObject::connect(chatAction, &QAction::triggered, [&chatWindow]() {
         chatWindow.show();
         chatWindow.raise();
         chatWindow.activateWindow();
     });
 
-    // Help request action — popup dialog to type help message
+    // Help request action -  popup dialog to type help message
     QObject::connect(helpAction, &QAction::triggered, [&agent]() {
         bool ok;
         QString msg = QInputDialog::getMultiLineText(
-            nullptr, "Request Help",
-            "Describe your problem to the teacher:",
+            nullptr,
+            Lang::get().t("Request Help", "Minta Bantuan"),
+            Lang::get().t("Describe your problem to the teacher:",
+                          "Jelaskan masalahmu ke guru:"),
             "", &ok);
         if (ok && !msg.trimmed().isEmpty()) {
             agent.sendHelpRequest(msg.trimmed());
-            QMessageBox::information(nullptr, "Help Request Sent",
-                "Your help request has been sent to the teacher.");
+            QMessageBox::information(nullptr,
+                Lang::get().t("Help Request Sent", "Permintaan Bantuan Terkirim"),
+                Lang::get().t("Your help request has been sent to the teacher.",
+                              "Permintaan bantuanmu sudah terkirim ke guru."));
         }
     });
 
-    // Panel action — show/raise the floating panel
+    // Panel action -  show/raise the floating panel
     QObject::connect(panelAction, &QAction::triggered, [&studentPanel]() {
         studentPanel.show();
         studentPanel.raise();
@@ -1199,39 +1603,78 @@ int main(int argc, char* argv[])
         }
     });
 
-    // ════════════════════════════════════════════════════════
+    // ========================================================
     // Agent signal connections
-    // ════════════════════════════════════════════════════════
+    // ========================================================
+    // Track last connect/disconnect time so we can suppress tray spam when the
+    // teacher restarts the app or WiFi blips.
+    auto* lastConnState = new bool(false);
+    auto* lastStateChange = new qint64(0);
+
     QObject::connect(&agent, &LabMonitor::StudentAgent::connected,
-                     [&trayIcon, &statusAction, &studentPanel]() {
+                     [&trayIcon, &statusAction, &studentPanel, lastConnState, lastStateChange]() {
         QTextStream(stdout) << "[lab-student] Connected to teacher\n";
-        trayIcon.setToolTip("Simanta Student - Connected");
-        statusAction->setText("Status: Connected");
-        trayIcon.showMessage("Simanta", "Connected to teacher",
-                             QSystemTrayIcon::Information, 2000);
+        trayIcon.setToolTip(Lang::get().t("Simanta Student - Connected", "Simanta Siswa - Terhubung"));
+        statusAction->setText(Lang::get().t("Status: Connected", "Status: Terhubung"));
+        qint64 now = QDateTime::currentMSecsSinceEpoch();
+        bool shouldNotify = !(*lastConnState) && (now - *lastStateChange > 5000);
+        if (shouldNotify) {
+            trayIcon.showMessage("Simanta",
+                Lang::get().t("Connected to teacher", "Terhubung dengan guru"),
+                QSystemTrayIcon::Information, 2000);
+        }
+        *lastConnState = true;
+        *lastStateChange = now;
         studentPanel.setConnected(true);
     });
 
     // Teacher discovered via UDP beacon
+    auto* announcedTeachers = new QSet<QString>();
     QObject::connect(&agent, &LabMonitor::StudentAgent::teacherDiscovered,
-                     [&trayIcon](const QString& ip, uint16_t port, const QString& hostname) {
+                     [&trayIcon, announcedTeachers](const QString& ip, uint16_t port, const QString& hostname) {
         Q_UNUSED(port)
         QTextStream(stdout) << "[lab-student] Teacher discovered: " << hostname
                             << " at " << ip << "\n";
-        trayIcon.showMessage("Simanta", QStringLiteral("Teacher found: %1 (%2)").arg(hostname, ip),
-                             QSystemTrayIcon::Information, 3000);
+        QString key = hostname + "@" + ip;
+        if (announcedTeachers->contains(key)) return;
+        announcedTeachers->insert(key);
+        trayIcon.showMessage("Simanta",
+            Lang::get().t(QStringLiteral("Teacher found: %1 (%2)").arg(hostname, ip),
+                          QStringLiteral("Guru ditemukan: %1 (%2)").arg(hostname, ip)),
+            QSystemTrayIcon::Information, 3000);
+    });
+
+    // Debounce restriction-reset: only unblock if the student stays
+    // disconnected for more than 30 seconds (avoids thrashing PowerShell
+    // on brief WiFi blips during monitoring).
+    auto* pendingResetTimer = new QTimer(&app);
+    pendingResetTimer->setSingleShot(true);
+    pendingResetTimer->setInterval(30000);
+    QObject::connect(pendingResetTimer, &QTimer::timeout, []() {
+        QTextStream(stdout) << "[lab-student] Prolonged disconnect -> clearing restrictions\n";
+        resetAllRestrictions();
     });
 
     QObject::connect(&agent, &LabMonitor::StudentAgent::disconnected,
-                     [&lockOverlay, &trayIcon, &statusAction, &studentPanel]() {
+                     [&lockOverlay, &trayIcon, &statusAction, &studentPanel, pendingResetTimer, lastConnState, lastStateChange]() {
         QTextStream(stdout) << "[lab-student] Disconnected from teacher\n";
-        trayIcon.setToolTip("Simanta Student - Reconnecting...");
-        statusAction->setText("Status: Reconnecting...");
+        trayIcon.setToolTip(Lang::get().t("Simanta Student - Reconnecting...", "Simanta Siswa - Menyambung ulang..."));
+        statusAction->setText(Lang::get().t("Status: Reconnecting...", "Status: Menyambung ulang..."));
         studentPanel.setConnected(false);
+        *lastConnState = false;
+        *lastStateChange = QDateTime::currentMSecsSinceEpoch();
         if (lockOverlay.isVisible()) {
             lockOverlay.deactivate();
             QTextStream(stdout) << "[lab-student] Auto-unlocked (disconnected)\n";
         }
+        // Only clear proxy/USB/etc after 30 s of continuous disconnect.
+        if (!pendingResetTimer->isActive()) pendingResetTimer->start();
+    });
+
+    QObject::connect(&agent, &LabMonitor::StudentAgent::connected,
+                     [pendingResetTimer]() {
+        // Reconnected before the grace period elapsed -> do not reset restrictions.
+        if (pendingResetTimer->isActive()) pendingResetTimer->stop();
     });
 
     QObject::connect(&agent, &LabMonitor::StudentAgent::error, [](const QString& msg) {
@@ -1276,7 +1719,7 @@ int main(int argc, char* argv[])
                      [&chatWindow, &trayIcon, &studentPanel](const QString& sender, const QString& message) {
         chatWindow.addMessage(sender, message);
         studentPanel.onChatReceived();
-        trayIcon.showMessage("Chat from " + sender, message,
+        trayIcon.showMessage(Lang::get().t("Chat from ", "Chat dari ") + sender, message,
                              QSystemTrayIcon::Information, 3000);
     });
 
@@ -1305,30 +1748,29 @@ int main(int argc, char* argv[])
         qWarning() << "Failed to start PAC server on port 29999";
     }
 
+    // Blackhole proxy so that "PROXY 127.0.0.1:9999" fails fast with a clear
+    // "Blocked by Simanta" page instead of timing out.
+    g_blackholeProxy = new BlackholeProxy(&app);
+    if (!g_blackholeProxy->listen(QHostAddress::LocalHost, 9999)) {
+        qWarning() << "Failed to start blackhole proxy on port 9999";
+    }
+
     QObject::connect(&agent, &LabMonitor::StudentAgent::cmdReceived,
-                     [&studentPanel](const QString& cmd) {
+                     [&studentPanel, &lockOverlay](const QString& cmd) {
         QTextStream(stdout) << "[lab-student] Executing command: " << cmd << "\n";
         if (cmd.startsWith("SET_LANG:")) {
             QString lang = cmd.mid(9);
             Lang::get().setLanguage(lang);
             studentPanel.updateTranslations();
-        } else if (cmd == "USB_BLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 4"});
-        } else if (cmd == "USB_UNBLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Services\\USBSTOR' -Name 'Start' -Value 3"});
-        } else if (cmd == "TASKMGR_BLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "New-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -Value 1 -PropertyType DWord -Force; New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -Value 1 -PropertyType DWord -Force"});
-        } else if (cmd == "TASKMGR_UNBLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue"});
-        } else if (cmd == "REGEDIT_BLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "New-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -Value 1 -PropertyType DWord -Force; New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -Value 1 -PropertyType DWord -Force"});
-        } else if (cmd == "REGEDIT_UNBLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableRegistryTools' -ErrorAction SilentlyContinue"});
-        } else if (cmd == "SETTINGS_BLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "New-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -Value 1 -PropertyType DWord -Force; New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -Value 1 -PropertyType DWord -Force"});
-        } else if (cmd == "SETTINGS_UNBLOCK") {
-            QProcess::startDetached("powershell", {"-Command", "Remove-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -ErrorAction SilentlyContinue; Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer' -Name 'NoControlPanel' -ErrorAction SilentlyContinue"});
+            if (lockOverlay.isVisible()) lockOverlay.update(); // repaint in new language
         } else if (cmd == "INTERNET_BLOCK") {
+            // Hardest stance: block UDP 443/80 (QUIC) + TCP 80/443, and still
+            // install a deny-all PAC so anything that tries gets a clear error.
+            fw_addQuicBlock();
+            fw_addTcpBlock();
+            // Force browsers to use system proxy and disable DoH/QUIC so they
+            // can't bypass the PAC via direct DNS-over-HTTPS or HTTP/3.
+            browserPolicy_apply();
             QString pacContent = "function FindProxyForURL(url, host) {\n"
                                  "  if (host == \"localhost\" || host == \"127.0.0.1\") return \"DIRECT\";\n"
                                  "  return \"PROXY 127.0.0.1:9999\";\n"
@@ -1346,6 +1788,10 @@ int main(int argc, char* argv[])
             QProcess::startDetached("powershell", {"-Command", psCmd});
             QTimer::singleShot(500, []() { refreshWindowsProxy(); });
         } else if (cmd == "INTERNET_UNBLOCK") {
+            // Lift firewall rules first so traffic can flow immediately.
+            fw_removeQuicBlock();
+            fw_removeTcpBlock();
+            browserPolicy_remove();
             QProcess::startDetached("powershell", {"-Command", 
                 "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue; "
                 "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxyEnable' -Value 0 -Type DWord -Force; "
@@ -1355,23 +1801,155 @@ int main(int argc, char* argv[])
             });
             QTimer::singleShot(500, []() { refreshWindowsProxy(); });
         } else if (cmd.startsWith("WHITELIST_SET:")) {
+            // Whitelist mode: allow TCP (PAC decides whitelist vs blackhole),
+            // but kill QUIC/HTTP3 so browsers cannot sneak past the PAC via UDP 443.
+            fw_removeTcpBlock();
+            fw_addQuicBlock();
+            // Same browser hardening as INTERNET_BLOCK so DoH / Firefox-own-proxy
+            // can't bypass the system PAC.
+            browserPolicy_apply();
             QString domainsPart = cmd.mid(14);
             QStringList domains = domainsPart.split(",", Qt::SkipEmptyParts);
-            
+
+            // Extract a clean "host" from an arbitrary user-entered URL-like string.
+            // Handles: "https://foo.com/path", "www.foo.com", "foo.com/@user",
+            //          "foo.com:8080/path?x=1", "FOO.COM/", plain "foo.com".
+            auto normalizeHost = [](const QString& raw) -> QString {
+                QString d = raw.trimmed().toLower();
+                if (d.isEmpty()) return d;
+                // Strip scheme
+                int schemeIdx = d.indexOf("://");
+                if (schemeIdx >= 0) d = d.mid(schemeIdx + 3);
+                // Strip any path / query / fragment (anything after first '/', '?' or '#')
+                int cut = d.size();
+                for (QChar ch : {QChar('/'), QChar('?'), QChar('#')}) {
+                    int p = d.indexOf(ch);
+                    if (p >= 0 && p < cut) cut = p;
+                }
+                d = d.left(cut);
+                // Strip port
+                int colon = d.indexOf(':');
+                if (colon >= 0) d = d.left(colon);
+                // Strip leading "www."
+                if (d.startsWith("www.")) d = d.mid(4);
+                // Strip trailing dots
+                while (d.endsWith(".")) d.chop(1);
+                return d;
+            };
+
+            // Known "sibling" domains that many big sites NEED to function.
+            // Without these, things like YouTube channels won't load because the
+            // player, thumbnails and video CDN live on different hosts.
+            auto relatedDomains = [](const QString& host) -> QStringList {
+                QStringList extra;
+                if (host == "youtube.com" || host.endsWith(".youtube.com")) {
+                    extra << "youtu.be"
+                          << "youtube-nocookie.com"
+                          << "googlevideo.com"
+                          << "ytimg.com"
+                          << "ggpht.com"
+                          << "yt3.ggpht.com";
+                } else if (host == "google.com" || host.endsWith(".google.com")) {
+                    extra << "gstatic.com"
+                          << "googleusercontent.com"
+                          << "googleapis.com";
+                } else if (host == "facebook.com" || host.endsWith(".facebook.com")) {
+                    extra << "fbcdn.net" << "fbsbx.com";
+                } else if (host == "instagram.com" || host.endsWith(".instagram.com")) {
+                    extra << "cdninstagram.com" << "fbcdn.net";
+                } else if (host == "twitter.com" || host == "x.com") {
+                    extra << "twimg.com" << "t.co";
+                } else if (host == "github.com" || host.endsWith(".github.com")) {
+                    // GitHub splits CSS/JS/images/avatars/raw files/API across
+                    // many hosts. Without these the site renders broken.
+                    extra << "githubassets.com"
+                          << "githubusercontent.com"
+                          << "githubcopilot.com"
+                          << "github.io"
+                          << "github.dev"
+                          << "githubstatus.com";
+                } else if (host == "wikipedia.org" || host.endsWith(".wikipedia.org")
+                           || host == "wikimedia.org" || host.endsWith(".wikimedia.org")) {
+                    extra << "wikimedia.org"
+                          << "wikipedia.org"
+                          << "wikidata.org"
+                          << "wiktionary.org"
+                          << "mediawiki.org";
+                } else if (host == "reddit.com" || host.endsWith(".reddit.com")) {
+                    extra << "redd.it"
+                          << "redditstatic.com"
+                          << "redditmedia.com";
+                } else if (host == "linkedin.com" || host.endsWith(".linkedin.com")) {
+                    extra << "licdn.com";
+                } else if (host == "discord.com" || host.endsWith(".discord.com")) {
+                    extra << "discordapp.com"
+                          << "discordapp.net"
+                          << "discord.gg"
+                          << "discord.media";
+                } else if (host == "microsoft.com" || host.endsWith(".microsoft.com")) {
+                    extra << "msecnd.net"
+                          << "office.com"
+                          << "office.net"
+                          << "live.com";
+                } else if (host == "stackoverflow.com" || host.endsWith(".stackoverflow.com")) {
+                    extra << "sstatic.net"
+                          << "stackexchange.com";
+                }
+                return extra;
+            };
+
+            // Common asset / font / CDN hosts that almost every modern site
+            // pulls from. We always allow these in whitelist mode so that
+            // whitelisted pages render with their CSS, JS and web fonts
+            // instead of looking broken. These hosts don't host browsable
+            // content, they only serve static assets.
+            const QStringList commonAssetCdns = {
+                // jsDelivr / unpkg / cdnjs – JS library CDNs
+                "jsdelivr.net",
+                "unpkg.com",
+                "cdnjs.cloudflare.com",
+                // Popular per-library CDNs
+                "jquery.com",
+                "bootstrapcdn.com",
+                "fontawesome.com",
+                "use.fontawesome.com",
+                "kit.fontawesome.com",
+                // Google Fonts (font CSS + WOFF files)
+                "fonts.googleapis.com",
+                "fonts.gstatic.com",
+                // Typekit / Adobe Fonts
+                "typekit.net",
+                "use.typekit.net",
+                // Generic static-asset providers
+                "gstatic.com"
+            };
+
+            QSet<QString> uniqueHosts;
+            for (const QString& raw : domains) {
+                QString host = normalizeHost(raw);
+                if (host.isEmpty()) continue;
+                uniqueHosts.insert(host);
+                for (const QString& rel : relatedDomains(host)) {
+                    uniqueHosts.insert(rel);
+                }
+            }
+            // Always include generic asset/font CDNs so whitelisted pages
+            // render with their styles, scripts and fonts.
+            for (const QString& cdn : commonAssetCdns) {
+                uniqueHosts.insert(cdn);
+            }
+
             QString pacContent = "function FindProxyForURL(url, host) {\n";
-            for (const QString& domain : domains) {
-                QString d = domain.trimmed();
-                if (d.startsWith("https://")) d = d.mid(8);
-                if (d.startsWith("http://")) d = d.mid(7);
-                while (d.endsWith("/")) d.chop(1);
-                pacContent += QString("  if (dnsDomainIs(host, \"%1\") || host == \"%1\") return \"DIRECT\";\n").arg(d);
-                if (!d.startsWith("*.")) pacContent += QString("  if (dnsDomainIs(host, \".%1\")) return \"DIRECT\";\n").arg(d);
+            pacContent += "  host = host.toLowerCase();\n";
+            for (const QString& d : uniqueHosts) {
+                // Match the domain itself and any subdomain of it
+                pacContent += QString("  if (host == \"%1\" || dnsDomainIs(host, \".%1\")) return \"DIRECT\";\n").arg(d);
             }
             pacContent += "  if (host == \"localhost\" || host == \"127.0.0.1\") return \"DIRECT\";\n";
             pacContent += "  return \"PROXY 127.0.0.1:9999\";\n}\n";
-            
+
             if (g_pacServer) g_pacServer->currentPacContent = pacContent;
-            
+
             QString fileUrl = "http://127.0.0.1:29999/proxy.pac";
             QString psCmd = "New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Force -ErrorAction SilentlyContinue | Out-Null; "
                 "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'EnableLegacyAutoProxyFeatures' -Value 1 -Type DWord -Force; "
@@ -1382,8 +1960,12 @@ int main(int argc, char* argv[])
                 "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'ProxyEnable' -Value 0 -PropertyType DWord -Force";
             QProcess::startDetached("powershell", {"-Command", psCmd});
             QTimer::singleShot(500, []() { refreshWindowsProxy(); });
-            QTextStream(stdout) << "[lab-student] Whitelist PAC HTTP Server applied with " << domains.size() << " domains\n";
+            QTextStream(stdout) << "[lab-student] Whitelist PAC HTTP Server applied with "
+                                << uniqueHosts.size() << " hosts\n";
         } else if (cmd == "WHITELIST_CLEAR") {
+            // Lift QUIC block as well.
+            fw_removeQuicBlock();
+            browserPolicy_remove();
             if (g_pacServer) g_pacServer->currentPacContent = "";
             QProcess::startDetached("powershell", {"-Command", 
                 "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name 'EnableLegacyAutoProxyFeatures' -ErrorAction SilentlyContinue; "
@@ -1397,18 +1979,23 @@ int main(int argc, char* argv[])
         }
     });
 
-    // ── KICK handling: teacher forcefully disconnected this student ──
+    // -- KICK handling: teacher forcefully disconnected this student --
     QObject::connect(&agent, &LabMonitor::StudentAgent::kicked,
                      [&agent, &lockOverlay, &trayIcon, &statusAction, &studentPanel]() {
         QTextStream(stdout) << "[lab-student] KICKED by teacher\n";
-        trayIcon.setToolTip("Simanta Student - Disconnected by Teacher");
-        statusAction->setText("Status: Disconnected by Teacher");
-        trayIcon.showMessage("Simanta", "You have been disconnected by the teacher.\nReconnecting in 30 seconds...",
-                             QSystemTrayIcon::Warning, 5000);
+        trayIcon.setToolTip(Lang::get().t("Simanta Student - Disconnected by Teacher",
+                                          "Simanta Siswa - Diputus oleh Guru"));
+        statusAction->setText(Lang::get().t("Status: Disconnected by Teacher",
+                                            "Status: Diputus oleh Guru"));
+        trayIcon.showMessage("Simanta",
+            Lang::get().t("You have been disconnected by the teacher.\nReconnecting in 30 seconds...",
+                          "Kamu telah diputus oleh guru.\nMenyambung ulang dalam 30 detik..."),
+            QSystemTrayIcon::Warning, 5000);
         studentPanel.setConnected(false);
         if (lockOverlay.isVisible()) {
             lockOverlay.deactivate();
         }
+        resetAllRestrictions();
 
         // Restart the agent after 30 seconds so student can reconnect later
         QTimer::singleShot(30000, &agent, [&agent]() {
@@ -1435,11 +2022,23 @@ int main(int argc, char* argv[])
     studentPanel.show();
     studentPanel.positionOnScreen();
 
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, []() {
+        // resetAllRestrictionsSync() internally checks g_shuttingDown and
+        // becomes a no-op during Windows shutdown (avoids spawning netsh /
+        // powershell while the session is already being torn down, which
+        // surfaces as "netsh.exe Application Error" dialogs).
+        resetAllRestrictionsSync();
+    });
+
+    // Force unblock everything on startup in case it was killed via Task Manager previously
+    resetAllRestrictions();
+
     agent.start();
 
     return app.exec();
 }
 
 #include "main.moc"
+
 
 

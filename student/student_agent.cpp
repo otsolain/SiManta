@@ -9,6 +9,7 @@
 #include <QStandardPaths>
 #include <QProcess>
 #include <QNetworkDatagram>
+#include <QRegularExpression>
 
 #include <windows.h>
 #include <psapi.h>
@@ -124,7 +125,7 @@ void StudentAgent::onConnected()
     m_readBuffer.clear();
     resetReconnectBackoff();
 
-    // ── Socket tuning for reliable, high-throughput connection ──
+    // -- Socket tuning for reliable, high-throughput connection --
     m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
     m_socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
     m_socket->setReadBufferSize(8 * 1024 * 1024); // 8 MB read buffer
@@ -136,11 +137,20 @@ void StudentAgent::onConnected()
     m_waitingForPong = false;
     m_appStatusCounter = 0;
 
+    // -- Fix freeze: reset delta state and force a full keyframe on (re)connect --
+    // Without this, the teacher would receive deltas referencing a frame it
+    // doesn't have, silently dropping them and freezing the preview.
+    if (m_capturer) {
+        m_capturer->resetDelta();
+    }
+    m_forceKeyframe = true;
+    m_lastKeyframeTimer.restart();
+
     sendHello();
     m_captureTimer->start();
     m_pingTimer->start();
 
-    // Stop discovery once connected — we found the teacher
+    // Stop discovery once connected -- we found the teacher
     stopDiscovery();
 
     emit connected();
@@ -154,17 +164,37 @@ void StudentAgent::onDisconnected()
     m_captureTimer->stop();
     m_pingTimer->stop();
 
+    // -- If a file transfer was in progress, abort it cleanly so we don't
+    //    leave a half-written file open and the capture rate stays slow
+    //    forever after the next reconnect. --
+    if (m_incomingFile) {
+        qWarning() << "[StudentAgent] Disconnect mid-transfer, closing partial file:"
+                   << m_incomingFileName;
+        m_incomingFile->close();
+        delete m_incomingFile;
+        m_incomingFile = nullptr;
+    }
+    m_incomingFileName.clear();
+    m_incomingFileSize = 0;
+    m_incomingReceived = 0;
+    m_incomingSkip = false;
+
+    if (m_capturePausedForTransfer) {
+        m_captureTimer->setInterval(m_savedCaptureInterval);
+        m_capturePausedForTransfer = false;
+    }
+
     emit disconnected();
     if (m_running && !m_reconnectTimer->isActive()) {
         if (m_autoDiscovery) {
             // Restart discovery to find teacher again (may have changed IP)
             qInfo() << "[StudentAgent] Restarting discovery after disconnect";
             startDiscovery();
-        } else {
-            qInfo() << "[StudentAgent] Reconnecting in" << m_reconnectDelay << "ms";
-            m_reconnectTimer->start(m_reconnectDelay);
-            m_reconnectDelay = qMin(m_reconnectDelay * 2, m_maxReconnectDelay);
         }
+        // Always try direct reconnect as well (teacher IP might be the same)
+        qInfo() << "[StudentAgent] Reconnecting in" << m_reconnectDelay << "ms";
+        m_reconnectTimer->start(m_reconnectDelay);
+        m_reconnectDelay = qMin(m_reconnectDelay * 2, m_maxReconnectDelay);
     }
 }
 
@@ -178,11 +208,10 @@ void StudentAgent::onSocketError(QAbstractSocket::SocketError err)
         if (m_autoDiscovery) {
             qInfo() << "[StudentAgent] Connection failed, restarting discovery";
             startDiscovery();
-        } else {
-            qInfo() << "[StudentAgent] Connection failed, retrying in" << m_reconnectDelay << "ms";
-            m_reconnectTimer->start(m_reconnectDelay);
-            m_reconnectDelay = qMin(m_reconnectDelay * 2, m_maxReconnectDelay);
         }
+        qInfo() << "[StudentAgent] Connection failed, retrying in" << m_reconnectDelay << "ms";
+        m_reconnectTimer->start(m_reconnectDelay);
+        m_reconnectDelay = qMin(m_reconnectDelay * 2, m_maxReconnectDelay);
     }
 }
 
@@ -225,7 +254,7 @@ void StudentAgent::processIncomingData()
             }
             break;
         case MsgType::PONG:
-            // ── Connection health confirmed ──
+            // -- Connection health confirmed --
             m_waitingForPong = false;
             m_missedPongs = 0;
             // Restore quality if it was reduced due to missed PONGs
@@ -277,6 +306,15 @@ void StudentAgent::processIncomingData()
             break;
         }
         case MsgType::TRANSFER_START:
+            // -- Slow down screen capture during file receive so the event
+            //    loop has bandwidth to drain incoming chunks. On weak student
+            //    PCs the BitBlt+JPEG encode of every capture can starve
+            //    readyRead() and the transfer appears stuck for seconds. --
+            if (!m_capturePausedForTransfer) {
+                m_savedCaptureInterval = m_captureTimer->interval();
+                m_captureTimer->setInterval(qMax(m_savedCaptureInterval * 4, 5000));
+                m_capturePausedForTransfer = true;
+            }
             handleFileStart(payload);
             break;
         case MsgType::TRANSFER_CHUNK:
@@ -284,6 +322,11 @@ void StudentAgent::processIncomingData()
             break;
         case MsgType::TRANSFER_END:
             handleFileEnd(payload);
+            // Restore capture rate.
+            if (m_capturePausedForTransfer) {
+                m_captureTimer->setInterval(m_savedCaptureInterval);
+                m_capturePausedForTransfer = false;
+            }
             break;
         case MsgType::DIR_LIST_REQUEST:
             handleDirListRequest(payload);
@@ -300,6 +343,9 @@ void StudentAgent::processIncomingData()
                 stream.setVersion(QDataStream::Qt_6_0);
                 qint32 ms;
                 stream >> ms;
+                // Clamp to a safe range so a bad/partial packet can't spin the
+                // capture timer or effectively stop updates forever.
+                ms = qBound<qint32>(100, ms, 60000);
                 m_captureInterval = ms;
                 m_captureTimer->setInterval(m_captureInterval);
                 qInfo() << "[StudentAgent] Capture interval set to:" << ms << "ms";
@@ -307,23 +353,33 @@ void StudentAgent::processIncomingData()
             break;
         }
         case MsgType::QUALITY_HIGH:
-            // ── Veyon-like: teacher opened fullscreen → switch to high-res fast mode ──
+            // -- Veyon-like: teacher opened fullscreen -> switch to high-res fast mode --
             qInfo() << "[StudentAgent] Switching to HIGH quality mode (fullscreen view)";
             m_capturer->setQuality(95);       // Near-lossless
             m_capturer->setScale(1.0);        // Full resolution
             m_captureTimer->setInterval(200); // ~5 FPS for smooth live view
             m_capturer->resetDelta();         // Force full frame on next capture
+            m_forceKeyframe = true;
+            m_lastKeyframeTimer.restart();
             break;
         case MsgType::QUALITY_NORMAL:
-            // ── Teacher closed fullscreen → restore normal thumbnail mode ──
-            qInfo() << "[StudentAgent] Switching to NORMAL quality mode (thumbnail view)";
-            m_capturer->setQuality(m_adaptiveQuality);
-            m_capturer->setScale(0.5);                   // Half resolution for thumbnails
-            m_captureTimer->setInterval(m_captureInterval); // Original interval
+            // -- Teacher closed fullscreen -> restore normal thumbnail mode --
+            // Idempotent: only apply if we're currently in "high" mode; otherwise
+            // just force a keyframe so stale thumbnails refresh without
+            // thrashing capture settings.
+            qInfo() << "[StudentAgent] QUALITY_NORMAL received";
+            if (m_capturer->scale() > 0.99 || m_captureTimer->interval() < m_captureInterval) {
+                m_capturer->setQuality(m_adaptiveQuality);
+                m_capturer->setScale(0.5);
+                m_captureTimer->setInterval(m_captureInterval);
+            }
+            m_capturer->resetDelta();
+            m_forceKeyframe = true;
+            m_lastKeyframeTimer.restart();
             break;
         case MsgType::KICK:
-            // Teacher forcefully disconnected us — stop reconnecting
-            qInfo() << "[StudentAgent] KICKED by teacher — stopping reconnect";
+            // Teacher forcefully disconnected us -  stop reconnecting
+            qInfo() << "[StudentAgent] KICKED by teacher -  stopping reconnect";
             m_running = false;  // prevents onDisconnected() from auto-reconnecting
             m_captureTimer->stop();
             m_pingTimer->stop();
@@ -360,26 +416,32 @@ void StudentAgent::captureAndSend()
         return;
     }
 
-    // ── Adaptive backpressure: skip frame if write buffer is congested ──
+    // -- Adaptive backpressure: skip frame if write buffer is congested --
+    // On bandwidth-limited links (phone hotspot, weak WiFi) the previous
+    // 10 MB threshold was way too high -- a slow link drains at ~100 KB/s,
+    // so 10 MB of buffered data means the student is 100 seconds behind
+    // realtime, way past the 90s teacher timeout. Lower thresholds let us
+    // throttle BEFORE the teacher kicks us for being silent.
     qint64 pendingBytes = m_socket->bytesToWrite();
-    if (pendingBytes > 10 * 1024 * 1024) {
-        // Buffer critically full (>10 MB) — skip frame entirely
+    if (pendingBytes > 2 * 1024 * 1024) {
+        // Buffer critically full (>2 MB on a slow link = ~20s of latency)
+        //  -> skip frame entirely.
         m_consecutiveSkips++;
         if (m_consecutiveSkips % 5 == 0) {
-            qInfo() << "[StudentAgent] Write buffer congested (" << pendingBytes / 1024 / 1024
-                     << "MB), skipped" << m_consecutiveSkips << "frames";
+            qInfo() << "[StudentAgent] Write buffer congested (" << pendingBytes / 1024
+                     << "KB), skipped" << m_consecutiveSkips << "frames";
         }
-        // Reduce quality if we keep skipping
-        if (m_consecutiveSkips > 3 && m_adaptiveQuality > 30) {
-            m_adaptiveQuality = qMax(30, m_adaptiveQuality - 10);
+        // Reduce quality faster on bandwidth-limited networks.
+        if (m_consecutiveSkips > 2 && m_adaptiveQuality > 25) {
+            m_adaptiveQuality = qMax(25, m_adaptiveQuality - 10);
             m_capturer->setQuality(m_adaptiveQuality);
             qInfo() << "[StudentAgent] Reduced quality to" << m_adaptiveQuality << "(backpressure)";
         }
         return;
     }
 
-    // Gradually restore quality when buffer is healthy
-    if (m_consecutiveSkips > 0 && pendingBytes < 2 * 1024 * 1024) {
+    // Gradually restore quality when buffer is healthy.
+    if (m_consecutiveSkips > 0 && pendingBytes < 256 * 1024) {
         m_consecutiveSkips = 0;
         if (m_adaptiveQuality < m_baseQuality) {
             m_adaptiveQuality = qMin(m_baseQuality, m_adaptiveQuality + 5);
@@ -388,10 +450,27 @@ void StudentAgent::captureAndSend()
         }
     }
 
-    // ── Veyon-like delta frame capture ──
+    // -- Veyon-like delta frame capture --
+    // Safety-net keyframe: force a full frame every m_keyframeIntervalMs to
+    // recover from any state desync between student and teacher.
+    if (!m_forceKeyframe && m_lastKeyframeTimer.isValid()
+        && m_lastKeyframeTimer.elapsed() > m_keyframeIntervalMs) {
+        m_forceKeyframe = true;
+    }
+
+    if (m_forceKeyframe && m_capturer) {
+        m_capturer->resetDelta();
+    }
+
     DeltaResult delta = m_capturer->captureDelta();
 
-    // Nothing changed on screen → skip frame entirely (huge bandwidth saving!)
+    // When we forced a keyframe, the capturer will return a full frame above.
+    if (delta.isFullFrame) {
+        m_forceKeyframe = false;
+        m_lastKeyframeTimer.restart();
+    }
+
+    // Nothing changed on screen â†' skip frame entirely (huge bandwidth saving!)
     if (delta.isEmpty) {
         // Still count for app status throttle
         m_appStatusCounter++;
@@ -408,7 +487,7 @@ void StudentAgent::captureAndSend()
         QByteArray packet = createPacket(MsgType::FRAME, delta.fullJpeg);
         written = m_socket->write(packet);
     } else {
-        // Delta frame — only send changed tiles
+        // Delta frame -  only send changed tiles
         QByteArray payload;
         QDataStream stream(&payload, QIODevice::WriteOnly);
         stream.setByteOrder(QDataStream::LittleEndian);
@@ -426,7 +505,7 @@ void StudentAgent::captureAndSend()
         emit frameSent(static_cast<int>(written));
     }
 
-    // ── Throttle app status to every 3rd frame to reduce overhead ──
+    // -- Throttle app status to every 3rd frame to reduce overhead --
     m_appStatusCounter++;
     if (m_appStatusCounter >= 3) {
         m_appStatusCounter = 0;
@@ -537,13 +616,13 @@ void StudentAgent::sendPing()
         return;
     }
 
-    // ── PONG health monitoring ──
+    // -- PONG health monitoring --
     if (m_waitingForPong) {
         m_missedPongs++;
         if (m_missedPongs >= 5) {
             qWarning() << "[StudentAgent] Missed" << m_missedPongs
-                        << "PONGs — connection may be dead";
-            // Don't disconnect — let the TCP timeout handle it
+                        << "PONGs -  connection may be dead";
+            // Don't disconnect -  let the TCP timeout handle it
             // But reduce quality to minimize bandwidth
             if (m_adaptiveQuality > 30) {
                 m_adaptiveQuality = 30;
@@ -555,6 +634,11 @@ void StudentAgent::sendPing()
     m_waitingForPong = true;
     m_lastPongTimer.restart();
     m_socket->write(createPacket(MsgType::PING));
+    // -- Flush PING explicitly so it doesn't get queued behind a large
+    //    frame in the write buffer. On a saturated WiFi link with 2 MB of
+    //    pending data, a delayed PING means the teacher sees us as silent
+    //    and will time us out even though we're alive. --
+    m_socket->flush();
 }
 
 void StudentAgent::attemptReconnect()
@@ -579,19 +663,19 @@ void StudentAgent::startDiscovery()
         m_discoverySocket = new QUdpSocket(this);
         connect(m_discoverySocket, &QUdpSocket::readyRead,
                 this, &StudentAgent::onDiscoveryReadyRead);
+    } else {
+        if (m_discoverySocket->state() == QAbstractSocket::BoundState) {
+            m_discoverySocket->close();
+        }
     }
 
-    if (m_discoverySocket->state() != QAbstractSocket::BoundState) {
-        // Bind to DISCOVERY_PORT to receive teacher beacons
-        if (m_discoverySocket->bind(QHostAddress::AnyIPv4, DISCOVERY_PORT,
-                                      QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
-            qInfo() << "[StudentAgent] Discovery listening on UDP port" << DISCOVERY_PORT;
-        } else {
-            qWarning() << "[StudentAgent] Failed to bind discovery socket:"
-                        << m_discoverySocket->errorString();
-            // Fallback: try direct TCP connection
-            connectToTeacher();
-        }
+    // Bind to DISCOVERY_PORT to receive teacher beacons
+    if (m_discoverySocket->bind(QHostAddress::AnyIPv4, DISCOVERY_PORT,
+                                  QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
+        qInfo() << "[StudentAgent] Discovery listening on UDP port" << DISCOVERY_PORT;
+    } else {
+        qWarning() << "[StudentAgent] Failed to bind discovery socket:"
+                    << m_discoverySocket->errorString();
     }
 }
 
@@ -689,17 +773,87 @@ void StudentAgent::handleFileStart(const QByteArray& payload)
         return;
     }
 
-    // Use destPath if provided, otherwise default to Downloads/Simanta
-    QString targetDir;
-    if (!fsd.destPath.isEmpty()) {
-        targetDir = fsd.destPath;
-    } else {
-        QString downloadsDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-        targetDir = downloadsDir + "/Simanta";
+    // -- Parse destPath token. --
+    // Teacher sends "<path>|<policy>" where policy in {rename,overwrite,skip}.
+    // Tokens the teacher may use in <path>:
+    //   @DOWNLOADS@ @DESKTOP@ @DOCUMENTS@ @TEMP@
+    // These resolve on the student side to per-user system folders so paths
+    // always work regardless of Windows username.
+    QString rawDest = fsd.destPath;
+    QString policy = "rename"; // default
+    int pipe = rawDest.lastIndexOf('|');
+    if (pipe >= 0) {
+        policy = rawDest.mid(pipe + 1);
+        rawDest = rawDest.left(pipe);
     }
-    QDir().mkpath(targetDir);
 
-    QString filePath = targetDir + "/" + fsd.fileName;
+    auto resolveTokens = [](QString p) {
+        p.replace("@DOWNLOADS@", QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + "/Simanta");
+        p.replace("@DESKTOP@",   QStandardPaths::writableLocation(QStandardPaths::DesktopLocation));
+        p.replace("@DOCUMENTS@", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation));
+        p.replace("@TEMP@",      QDir::tempPath());
+        // Expand %USERPROFILE% style Windows environment variables.
+        QRegularExpression envRe(R"(%([A-Za-z0-9_]+)%)");
+        auto it = envRe.globalMatch(p);
+        while (it.hasNext()) {
+            auto m = it.next();
+            QString val = qEnvironmentVariable(m.captured(1).toUtf8().constData());
+            if (!val.isEmpty()) p.replace(m.captured(0), val);
+        }
+        return p;
+    };
+
+    QString targetDir = rawDest.isEmpty()
+        ? (QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + "/Simanta")
+        : resolveTokens(rawDest);
+
+    // Normalise slashes, trim trailing separators.
+    targetDir.replace('\\', '/');
+    while (targetDir.endsWith('/')) targetDir.chop(1);
+
+    // -- Ensure the destination folder exists (create intermediate dirs). --
+    if (!QDir().mkpath(targetDir)) {
+        qWarning() << "[StudentAgent] Failed to create destination folder:" << targetDir
+                   << "- falling back to default Downloads/Simanta";
+        targetDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + "/Simanta";
+        QDir().mkpath(targetDir);
+    }
+
+    // -- Resolve filename collisions according to policy. --
+    QString finalName = fsd.fileName;
+    QString filePath  = targetDir + "/" + finalName;
+
+    m_incomingSkip = false;
+    if (QFile::exists(filePath)) {
+        if (policy == "skip") {
+            qInfo() << "[StudentAgent] Skipping transfer: file already exists at" << filePath;
+            m_incomingSkip = true;
+            m_incomingFileName = finalName;
+            m_incomingFileSize = fsd.fileSize;
+            m_incomingReceived = 0;
+            m_incomingIsFolder = fsd.isFolder;
+            emit fileReceiveStarted(finalName, fsd.fileSize, fsd.isFolder);
+            return;
+        }
+        if (policy == "rename") {
+            QFileInfo fi(filePath);
+            QString base  = fi.completeBaseName();
+            QString suffix = fi.suffix();
+            for (int i = 1; i <= 999; ++i) {
+                QString candidate = suffix.isEmpty()
+                    ? QStringLiteral("%1 (%2)").arg(base).arg(i)
+                    : QStringLiteral("%1 (%2).%3").arg(base).arg(i).arg(suffix);
+                QString candidatePath = targetDir + "/" + candidate;
+                if (!QFile::exists(candidatePath)) {
+                    finalName = candidate;
+                    filePath  = candidatePath;
+                    break;
+                }
+            }
+        }
+        // "overwrite" -> fall through; WriteOnly|Truncate replaces the file
+    }
+
     if (m_incomingFile) {
         m_incomingFile->close();
         delete m_incomingFile;
@@ -708,33 +862,56 @@ void StudentAgent::handleFileStart(const QByteArray& payload)
 
     m_incomingFile = new QFile(filePath, this);
     if (!m_incomingFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        qWarning() << "[StudentAgent] Cannot open file for writing:" << filePath;
+        qWarning() << "[StudentAgent] Cannot open file for writing:" << filePath
+                   << "error:" << m_incomingFile->errorString();
         delete m_incomingFile;
         m_incomingFile = nullptr;
         return;
     }
 
-    m_incomingFileName = fsd.fileName;
+    m_incomingFileName = finalName;
     m_incomingFileSize = fsd.fileSize;
     m_incomingReceived = 0;
     m_incomingIsFolder = fsd.isFolder;
 
-    qInfo() << "[StudentAgent] Receiving file:" << fsd.fileName
+    qInfo() << "[StudentAgent] Receiving file:" << finalName
              << "->" << targetDir
-             << "size:" << fsd.fileSize << "isFolder:" << fsd.isFolder;
+             << "size:" << fsd.fileSize
+             << "policy:" << policy
+             << "(origName:" << fsd.fileName << ")";
 
-    emit fileReceiveStarted(fsd.fileName, fsd.fileSize, fsd.isFolder);
+    emit fileReceiveStarted(finalName, fsd.fileSize, fsd.isFolder);
 }
 
 void StudentAgent::handleFileChunk(const QByteArray& payload)
 {
+    if (m_incomingSkip) {
+        // Silently drop chunks for a skipped transfer.
+        m_incomingReceived += payload.size();
+        if (m_incomingFileSize > 0) {
+            int percent = static_cast<int>((m_incomingReceived * 100) / m_incomingFileSize);
+            emit fileReceiveProgress(m_incomingFileName, qBound(0, percent, 100));
+        }
+        return;
+    }
+
     if (!m_incomingFile || !m_incomingFile->isOpen()) {
         qWarning() << "[StudentAgent] FILE_CHUNK but no active transfer";
         return;
     }
 
+    // -- Flush periodically so File Explorer shows real-time growth and a
+    //    crash mid-transfer doesn't lose everything to OS cache. --
+    qint64 prev = m_incomingReceived;
     m_incomingFile->write(payload);
     m_incomingReceived += payload.size();
+
+    // Cross 1 MB boundary -> flush. Cheap on Windows (writes Qt buffer to OS;
+    // OS writeback will commit to disk shortly after).
+    if ((m_incomingReceived >> 20) != (prev >> 20)) {
+        m_incomingFile->flush();
+    }
+
     if (m_incomingFileSize > 0) {
         int percent = static_cast<int>((m_incomingReceived * 100) / m_incomingFileSize);
         emit fileReceiveProgress(m_incomingFileName, qBound(0, percent, 100));
@@ -744,6 +921,19 @@ void StudentAgent::handleFileChunk(const QByteArray& payload)
 void StudentAgent::handleFileEnd(const QByteArray& payload)
 {
     Q_UNUSED(payload)
+
+    // "Skip" path: we never opened a file. Still emit completion so the
+    // teacher's progress UI can close cleanly and the user sees a result.
+    if (m_incomingSkip) {
+        qInfo() << "[StudentAgent] File skipped:" << m_incomingFileName;
+        QString name = m_incomingFileName;
+        m_incomingSkip = false;
+        m_incomingFileName.clear();
+        m_incomingFileSize = 0;
+        m_incomingReceived = 0;
+        emit fileReceiveCompleted(name, QString(), false);
+        return;
+    }
 
     if (!m_incomingFile || !m_incomingFile->isOpen()) {
         qWarning() << "[StudentAgent] FILE_END but no active transfer";
@@ -758,33 +948,7 @@ void StudentAgent::handleFileEnd(const QByteArray& payload)
     qInfo() << "[StudentAgent] File received:" << filePath
              << "(" << m_incomingReceived << "bytes)";
 
-    QString savePath = filePath;
-    bool wasFolder = m_incomingIsFolder;
-    if (m_incomingIsFolder && filePath.endsWith(".zip", Qt::CaseInsensitive)) {
-        QString extractDir = filePath;
-        extractDir.chop(4); // remove .zip
-        QDir().mkpath(extractDir);
-        QProcess* proc = new QProcess(this);
-        QString fName = m_incomingFileName;
-        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this, proc, filePath, extractDir, fName](int exitCode, QProcess::ExitStatus) {
-            if (exitCode == 0) {
-                QFile::remove(filePath); // delete temp zip
-                qInfo() << "[StudentAgent] Folder extracted to:" << extractDir;
-            } else {
-                qWarning() << "[StudentAgent] Extract failed, exit code:" << exitCode;
-            }
-            proc->deleteLater();
-            emit fileReceiveCompleted(fName, extractDir, true);
-        });
-
-        proc->start("powershell", QStringList()
-            << "-NoProfile" << "-Command"
-            << QStringLiteral("Expand-Archive -Path '%1' -DestinationPath '%2' -Force")
-               .arg(filePath, extractDir));
-    } else {
-        emit fileReceiveCompleted(m_incomingFileName, savePath, false);
-    }
+    emit fileReceiveCompleted(m_incomingFileName, filePath, false);
 }
 
 double StudentAgent::getCpuUsage()
@@ -938,7 +1102,7 @@ void StudentAgent::sendNextRetrieveChunk()
         return;
     }
 
-    // ── Increased chunk size for faster transfers (512 KB, was 64 KB) ──
+    // -- Increased chunk size for faster transfers (512 KB, was 64 KB) --
     constexpr int CHUNK_SIZE = 512 * 1024;
     QByteArray chunk = m_retrieveFile->read(CHUNK_SIZE);
 
@@ -974,4 +1138,5 @@ QString StudentAgent::parseCmdPayload(const QByteArray& payload)
 }
 
 } // namespace LabMonitor
+
 

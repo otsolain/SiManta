@@ -9,6 +9,9 @@
 #include <QHeaderView>
 #include <QScrollBar>
 #include <QMap>
+#include <QSet>
+#include <QTimer>
+#include <functional>
 #include <QSystemTrayIcon>
 #include <QStackedWidget>
 #include <QGroupBox>
@@ -25,18 +28,6 @@
 
 namespace LabMonitor {
 
-/**
- * TutorWindow — Main application window for the Teacher Console.
- * 
- * Assembles all UI components:
- * - Toolbar (ribbon-style, top)
- * - Sidebar (navigation, left)
- * - Student Grid (thumbnail flow, center)
- * - Lesson Panel (collapsible, bottom)
- * - Status Bar (connection info + controls, bottom)
- *
- * Manages ConnectionManager and routes events to UI.
- */
 class TutorWindow : public QMainWindow
 {
     Q_OBJECT
@@ -60,7 +51,6 @@ private slots:
 private:
     void setupUi();
     void setupInternetTab();
-    void setupSecurityTab();
     void setupSettingsTab();
     void updateTranslations();
     void setupStatusBar();
@@ -69,12 +59,20 @@ private:
     void updateStatusLabel();
     void saveSettings();
     void loadSettings();
+
+    // Apply the current internet/whitelist policy to a specific student
+    // (used when a new student connects) or to the current target set.
+    void applyPolicyToStudent(const QString& studentId);
+    QStringList currentPolicyTargetIds() const;
+    // Build the WHITELIST_SET command with expanded related domains so that
+    // even older student builds (without relatedDomains logic) get the full
+    // list of hosts needed for whitelisted sites to render correctly.
+    QString buildWhitelistCommand() const;
     ToolbarWidget*     m_toolbar = nullptr;
     SidebarWidget*     m_sidebar = nullptr;
     QStackedWidget*    m_stackedWidget = nullptr;
     StudentGrid*       m_grid = nullptr;
     QWidget*           m_internetWidget = nullptr;
-    QWidget*           m_securityWidget = nullptr;
     QWidget*           m_settingsWidget = nullptr;
 
     QComboBox*         m_langCombo = nullptr;
@@ -103,8 +101,20 @@ private:
         bool isTeacher;
     };
     QMap<QString, QList<ChatEntry>> m_chatHistory;
-    
+
+    // -- Policy state (for auto-applying to newly connected students) --
+    QSet<QString> m_policyTargetIds;         // students that receive the policy
+    bool          m_policyAutoAddNewStudents = false;  // auto-check newly connected students
+    bool          m_internetBlocked = false;
+    QStringList   m_whitelistUrls;
+
     QSystemTrayIcon* m_trayIcon = nullptr;
+    QTimer*          m_staleFrameCheckTimer = nullptr;
+
+    // Callback set by setupInternetTab() so onStudentConnected/Disconnected
+    // can refresh the student list regardless of which order the subsystems
+    // were constructed in.
+    std::function<void()> m_rebuildInternetStudentList;
 };
 
 } // namespace LabMonitor

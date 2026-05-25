@@ -58,11 +58,9 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
 
 
     m_btnSendFile    = createToolButton(":/icons/icons/send_url.svg", Lang::get().t("Send\nFile", "Kirim\nFile"), true);
-    m_btnSendFolder  = createToolButton(":/icons/icons/send_url.svg", Lang::get().t("Send\nFolder", "Kirim\nFolder"), true);
     m_btnRetrieve    = createToolButton(":/icons/icons/help.svg", Lang::get().t("Retrieve\nFile", "Tarik\nFile"), true);
 
     m_layout->addWidget(m_btnSendFile);
-    m_layout->addWidget(m_btnSendFolder);
     m_layout->addWidget(m_btnRetrieve);
 
     m_layout->addStretch();
@@ -80,7 +78,6 @@ ToolbarWidget::ToolbarWidget(QWidget* parent)
     connect(m_btnChat,       &QToolButton::clicked, this, &ToolbarWidget::chatClicked);
     connect(m_btnHelp,       &QToolButton::clicked, this, &ToolbarWidget::helpRequestsClicked);
     connect(m_btnSendFile,   &QToolButton::clicked, this, &ToolbarWidget::sendFileClicked);
-    connect(m_btnSendFolder, &QToolButton::clicked, this, &ToolbarWidget::sendFolderClicked);
     connect(m_btnRetrieve,   &QToolButton::clicked, this, &ToolbarWidget::retrieveFileClicked);
 
 }
@@ -128,8 +125,22 @@ void ToolbarWidget::updateTranslations()
     if (m_btnChat) m_btnChat->setText(Lang::get().t("Chat", "Obrolan"));
     if (m_btnHelp) m_btnHelp->setText(Lang::get().t("Help\nRequests", "Permintaan\nBantuan"));
     if (m_btnSendFile) m_btnSendFile->setText(Lang::get().t("Send\nFile", "Kirim\nFile"));
-    if (m_btnSendFolder) m_btnSendFolder->setText(Lang::get().t("Send\nFolder", "Kirim\nFolder"));
     if (m_btnRetrieve) m_btnRetrieve->setText(Lang::get().t("Retrieve\nFile", "Tarik\nFile"));
+}
+
+void ToolbarWidget::setStudentActionsEnabled(bool enabled)
+{
+    // Disable student-targeted actions when not on the student grid view.
+    // Help Requests and Chat remain enabled since they are not student-selection dependent.
+    if (m_btnSendUrl) m_btnSendUrl->setEnabled(enabled);
+    if (m_btnBroadcast) m_btnBroadcast->setEnabled(enabled);
+    if (m_btnLock) m_btnLock->setEnabled(enabled);
+    if (m_btnUnlock) m_btnUnlock->setEnabled(enabled);
+    if (m_btnDisconnect) m_btnDisconnect->setEnabled(enabled);
+    if (m_btnSendFile) m_btnSendFile->setEnabled(enabled);
+    if (m_btnRetrieve) m_btnRetrieve->setEnabled(enabled);
+    if (m_btnRefresh) m_btnRefresh->setEnabled(enabled);
+    if (m_btnRegister) m_btnRegister->setEnabled(enabled);
 }
 
 } // namespace LabMonitor

@@ -1,4 +1,3 @@
-# Common protocol library
 add_library(lab_common STATIC
     protocol.cpp
 )

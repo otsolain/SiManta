@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-2022
@@ -45,34 +48,33 @@ jobs:
       run: |
         $env:PATH = "D:\Qt\6.6.3\msvc2019_64\bin;$env:PATH"
         New-Item -ItemType Directory -Force -Path dist\teacher
-        Copy-Item build\teacher\lab-teacher.exe dist\teacher\
-        windeployqt --release --no-translations --no-opengl-sw --compiler-runtime dist\teacher\lab-teacher.exe
+        Copy-Item build\teacher\SimantaTeacher.exe dist\teacher\
+        windeployqt --release --no-translations --no-opengl-sw --compiler-runtime dist\teacher\SimantaTeacher.exe
 
     - name: Package Student
       run: |
         $env:PATH = "D:\Qt\6.6.3\msvc2019_64\bin;$env:PATH"
         New-Item -ItemType Directory -Force -Path dist\student
-        Copy-Item build\student\lab-student.exe dist\student\
-        windeployqt --release --no-translations --no-opengl-sw --compiler-runtime dist\student\lab-student.exe
-
-    - name: Upload Teacher
-      uses: actions/upload-artifact@v4
-      with:
-        name: LabMonitor-Teacher-Windows
-        path: dist/teacher/
-
-    - name: Upload Student
-      uses: actions/upload-artifact@v4
-      with:
-        name: LabMonitor-Student-Windows
-        path: dist/student/
+        Copy-Item build\student\SimantaStudent.exe dist\student\
+        windeployqt --release --no-translations --no-opengl-sw --compiler-runtime dist\student\SimantaStudent.exe
 
     - name: Download VC++ Redistributable
       run: |
         Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile dist/vc_redist.x64.exe
 
-    - name: Upload VC++ Redistributable
-      uses: actions/upload-artifact@v4
+    - name: Build Installer using Inno Setup
+      run: |
+        iscc setup_dist.iss
+
+    - name: Create Direct Release
+      uses: ncipollo/release-action@v1
       with:
-        name: VC-Redistributable
-        path: dist/vc_redist.x64.exe
+        artifacts: "installer_output/Simanta.exe"
+        tag: "latest"
+        name: "Simanta Latest Build"
+        body: "Unduh file Simanta.exe di bawah ini (Klik bagian Assets)."
+        allowUpdates: true
+        makeLatest: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

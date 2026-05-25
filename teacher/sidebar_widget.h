@@ -27,7 +27,6 @@ private:
     QButtonGroup* m_buttonGroup;
     QPushButton* m_btnMonitor;
     QPushButton* m_btnInternet;
-    QPushButton* m_btnSecurity;
     QPushButton* m_btnSettings;
 };
 

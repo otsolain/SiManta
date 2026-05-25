@@ -1,30 +1,28 @@
 # Prerequisites
 *.d
 
-# Compiled Object files
+# Compiled object files
 *.slo
 *.lo
 *.o
 *.obj
 
-# Precompiled Headers
+# Precompiled headers
 *.gch
 *.pch
 
-# Compiled Dynamic libraries
+# Compiled libraries
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
+
+# Fortran module files (not used here, but harmless)
+*.mod
+*.smod
 
 # Executables
 *.exe
@@ -35,11 +33,9 @@
 CMakeLists.txt.user
 *.qm
 *.stash
+*_autogen/
 
-# Installer output (optional, depending on if you want it)
-# We will explicitly add the setup file later if needed
-
-# Visual Studio / VS Code
+# IDE
 .vs/
 .vscode/
 *.user
@@ -47,16 +43,21 @@ CMakeLists.txt.user
 
 # Build folders
 build/
+build_tools/
 dist/
 release/
 debug/
-
-# Keep the setup installer!
-!dist/installer/SiManta-Setup-1.0.0.exe
-
-# Ignore custom build files and scripts as requested by user
-*.bat
-*.ps1
-build_tools/
 installer_output/
+
+# Dev-only scripts (not needed to build the project)
+*.ps1
+strip_comments.py
+rename.py
 crop_logo.cpp
+
+# Personal scratch files
+teacher/help_requests_code.txt
+netsupport_school_research.md
+
+# Build batches and recovery batches ARE needed -- whitelist them.
+# (We deliberately don't blanket-ignore *.bat anymore.)

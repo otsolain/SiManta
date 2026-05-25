@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <QString>
 #include <QSettings>
 
@@ -26,3 +26,4 @@ public:
         return (currentLang == "id") ? id : en;
     }
 };
+

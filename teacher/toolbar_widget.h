@@ -34,10 +34,10 @@ signals:
     void chatClicked();
     void helpRequestsClicked();
     void sendFileClicked();
-    void sendFolderClicked();
     void retrieveFileClicked();
 public:
     void updateTranslations();
+    void setStudentActionsEnabled(bool enabled);
 
 private:
     QToolButton* createToolButton(const QString& iconPath, const QString& label,
@@ -54,7 +54,6 @@ private:
     QToolButton* m_btnChat = nullptr;
     QToolButton* m_btnHelp = nullptr;
     QToolButton* m_btnSendFile = nullptr;
-    QToolButton* m_btnSendFolder = nullptr;
     QToolButton* m_btnRetrieve = nullptr;
     QLabel* m_helpBadge = nullptr;
 };

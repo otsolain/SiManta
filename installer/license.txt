@@ -1,12 +1,12 @@
-SiManta - Classroom Management Software
+﻿Simanta - Classroom Management Software
 End User License Agreement (EULA)
 
-Copyright (c) 2026 SiManta. All rights reserved.
+Copyright (c) 2026 Simanta. All rights reserved.
 
 IMPORTANT: PLEASE READ THIS LICENSE AGREEMENT CAREFULLY BEFORE USING THIS SOFTWARE.
 
 1. LICENSE GRANT
-   SiManta grants you a non-exclusive, non-transferable license to use this software 
+   Simanta grants you a non-exclusive, non-transferable license to use this software 
    for educational purposes within your institution. You may install this software on 
    computers owned or managed by your educational institution.
 
@@ -46,3 +46,4 @@ IMPORTANT: PLEASE READ THIS LICENSE AGREEMENT CAREFULLY BEFORE USING THIS SOFTWA
 
 By clicking "I Agree" or installing this software, you acknowledge that you 
 have read this agreement and agree to be bound by its terms.
+

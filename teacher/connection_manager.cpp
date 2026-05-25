@@ -70,10 +70,16 @@ void ConnectionManager::stopListening()
     stopBeacon();
 }
 
-// ── Beacon packet: broadcast teacher presence for auto-discovery ──
+// -- Beacon packet: broadcast teacher presence for auto-discovery --
 void ConnectionManager::sendBeaconPacket()
 {
-    if (!m_beaconSocket) return;
+    // Recreate the socket every time to avoid Windows caching dead routes
+    // when the network interface changes (e.g. WiFi turned on after app starts).
+    if (m_beaconSocket) {
+        m_beaconSocket->deleteLater();
+    }
+    m_beaconSocket = new QUdpSocket(this);
+    m_beaconSocket->setSocketOption(QAbstractSocket::MulticastLoopbackOption, 0);
 
     // Build beacon datagram: [MAGIC 4B][TCP_PORT 2B][HOSTNAME utf8]
     QByteArray datagram;
@@ -126,7 +132,7 @@ void ConnectionManager::startBeacon(uint16_t tcpPort)
 
     m_beaconTimer->start();
 
-    // ── FIX: Send first beacon IMMEDIATELY (don't wait for timer interval) ──
+    // -- FIX: Send first beacon IMMEDIATELY (don't wait for timer interval) --
     sendBeaconPacket();
 
     qInfo() << "[ConnectionManager] UDP beacon started on port" << DISCOVERY_PORT
@@ -189,7 +195,7 @@ void ConnectionManager::onNewConnection()
 
         m_clients[socket] = state;
 
-        // ── Socket tuning for reliable, low-latency connections ──
+        // -- Socket tuning for reliable, low-latency connections --
         socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
         socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
 
@@ -356,8 +362,10 @@ void ConnectionManager::handleHello(QTcpSocket* socket, const QByteArray& payloa
     client.info.online = true;
     client.helloReceived = true;
 
-    // ── FIX: Detect duplicate student ID (same student reconnecting) ──
-    // If another socket already has this ID, remove the old one first
+    // -- FIX: Detect duplicate student ID (same student reconnecting) --
+    // If another socket already has this ID, replace it SILENTLY so the UI
+    // doesn't flicker disconnected->connected when the student just re-
+    // handshakes (e.g. after the teacher restarted the server).
     QList<QTcpSocket*> toRemove;
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (it.key() != socket && it.value().helloReceived && it.value().info.id == client.info.id) {
@@ -366,7 +374,7 @@ void ConnectionManager::handleHello(QTcpSocket* socket, const QByteArray& payloa
     }
     for (auto* oldSocket : toRemove) {
         qInfo() << "[ConnectionManager] Replacing duplicate connection for" << client.info.id;
-        removeClient(oldSocket);
+        removeClient(oldSocket, /*silent=*/true);
     }
 
     qInfo() << "[ConnectionManager] HELLO from" << client.info.hostname
@@ -413,16 +421,16 @@ void ConnectionManager::handleDeltaFrame(QTcpSocket* socket, const QByteArray& p
     // Need a previous frame to apply delta onto
     if (client.lastFrame.isNull()) {
         qWarning() << "[ConnectionManager] FRAME_DELTA but no previous frame for"
-                    << client.info.hostname << "— requesting full frame";
+                    << client.info.hostname << "- requesting full frame";
         return;
     }
 
     QDataStream stream(payload);
     stream.setByteOrder(QDataStream::LittleEndian);
 
-    uint16_t tileCount;
+    uint16_t tileCount = 0;
     stream >> tileCount;
-
+    if (stream.status() != QDataStream::Ok) return;
     if (tileCount == 0 || tileCount > 10000) return;
 
     // Paint changed tiles onto previous frame
@@ -471,13 +479,13 @@ void ConnectionManager::onClientTimeout()
     QTcpSocket* socket = static_cast<QTcpSocket*>(timer->property("socket").value<void*>());
     if (!socket || !m_clients.contains(socket)) return;
 
-    // ── FIX: Send a PING before disconnecting (grace period) ──
+    // -- FIX: Send a PING before disconnecting (grace period) --
     // Give the student one last chance to respond
     if (socket->state() == QAbstractSocket::ConnectedState) {
         qWarning() << "[ConnectionManager] Timeout for"
                     << m_clients[socket].info.hostname
                     << "(" << socket->peerAddress().toString().remove("::ffff:") << ")"
-                    << "— sending final PING before disconnect";
+                    << "- sending final PING before disconnect";
         socket->write(createPacket(MsgType::PING));
         socket->flush();
 
@@ -485,7 +493,7 @@ void ConnectionManager::onClientTimeout()
         QPointer<QTcpSocket> safeSocket(socket);
         QTimer::singleShot(10000, this, [this, safeSocket]() {
             if (safeSocket && m_clients.contains(safeSocket.data())) {
-                qWarning() << "[ConnectionManager] Final timeout — disconnecting"
+                qWarning() << "[ConnectionManager] Final timeout - disconnecting"
                             << m_clients[safeSocket.data()].info.hostname;
                 safeSocket->disconnectFromHost();
             }
@@ -495,7 +503,7 @@ void ConnectionManager::onClientTimeout()
     }
 }
 
-void ConnectionManager::removeClient(QTcpSocket* socket)
+void ConnectionManager::removeClient(QTcpSocket* socket, bool silent)
 {
     if (!m_clients.contains(socket)) return;
 
@@ -503,7 +511,8 @@ void ConnectionManager::removeClient(QTcpSocket* socket)
     QString id = client.info.id;
 
     qInfo() << "[ConnectionManager] Client disconnected:"
-             << client.info.hostname << "(" << client.info.ipAddress << ")";
+             << client.info.hostname << "(" << client.info.ipAddress << ")"
+             << (silent ? "[silent]" : "");
 
     if (client.timeoutTimer) {
         client.timeoutTimer->stop();
@@ -513,7 +522,7 @@ void ConnectionManager::removeClient(QTcpSocket* socket)
     m_clients.remove(socket);
     socket->deleteLater();
 
-    if (!id.isEmpty()) {
+    if (!id.isEmpty() && !silent) {
         emit studentDisconnected(id);
     }
 }
@@ -536,6 +545,7 @@ void ConnectionManager::sendMessage(const QStringList& studentIds, const QString
         if (!it.value().helloReceived) continue;
         if (studentIds.contains(it.value().info.id)) {
             it.key()->write(packet);
+            it.key()->flush();
             qInfo() << "[ConnectionManager] Sent MESSAGE to" << it.value().info.hostname;
         }
     }
@@ -550,6 +560,7 @@ void ConnectionManager::sendMessageToAll(const QString& title, const QString& bo
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
         it.key()->write(packet);
+        it.key()->flush();
         qInfo() << "[ConnectionManager] Sent MESSAGE to" << it.value().info.hostname;
     }
 }
@@ -561,6 +572,7 @@ void ConnectionManager::sendLockScreen(const QStringList& studentIds)
         if (!it.value().helloReceived) continue;
         if (studentIds.contains(it.value().info.id)) {
             it.key()->write(packet);
+            it.key()->flush();
             qInfo() << "[ConnectionManager] Sent LOCK to" << it.value().info.hostname;
         }
     }
@@ -573,6 +585,7 @@ void ConnectionManager::sendUnlockScreen(const QStringList& studentIds)
         if (!it.value().helloReceived) continue;
         if (studentIds.contains(it.value().info.id)) {
             it.key()->write(packet);
+            it.key()->flush();
             qInfo() << "[ConnectionManager] Sent UNLOCK to" << it.value().info.hostname;
         }
     }
@@ -584,6 +597,7 @@ void ConnectionManager::sendLockAll()
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
         it.key()->write(packet);
+        it.key()->flush();
     }
     qInfo() << "[ConnectionManager] Sent LOCK to ALL students";
 }
@@ -594,6 +608,7 @@ void ConnectionManager::sendUnlockAll()
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
         it.key()->write(packet);
+        it.key()->flush();
     }
     qInfo() << "[ConnectionManager] Sent UNLOCK to ALL students";
 }
@@ -606,12 +621,16 @@ void ConnectionManager::sendCommand(const QStringList& studentIds, const QString
     stream << cmd;
 
     QByteArray packet = createPacket(MsgType::CMD, payload);
+    int sent = 0;
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
         if (studentIds.contains(it.value().info.id)) {
             it.key()->write(packet);
+            it.key()->flush();
+            ++sent;
         }
     }
+    qInfo() << "[ConnectionManager] sendCommand:" << cmd.left(60) << "-> sent to" << sent << "of" << studentIds.size() << "targets";
 }
 
 void ConnectionManager::sendCommandToAll(const QString& cmd)
@@ -622,10 +641,14 @@ void ConnectionManager::sendCommandToAll(const QString& cmd)
     stream << cmd;
 
     QByteArray packet = createPacket(MsgType::CMD, payload);
+    int sent = 0;
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
         it.key()->write(packet);
+        it.key()->flush();
+        ++sent;
     }
+    qInfo() << "[ConnectionManager] sendCommandToAll:" << cmd.left(60) << "-> sent to" << sent << "clients";
 }
 
 void ConnectionManager::broadcastUpdateSpeed(int ms)
@@ -651,6 +674,7 @@ void ConnectionManager::sendUrl(const QStringList& studentIds, const QString& ur
         if (!it.value().helloReceived) continue;
         if (studentIds.contains(it.value().info.id)) {
             it.key()->write(packet);
+            it.key()->flush();
             qInfo() << "[ConnectionManager] Sent URL to" << it.value().info.hostname;
         }
     }
@@ -663,6 +687,7 @@ void ConnectionManager::sendUrlToAll(const QString& url)
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
         it.key()->write(packet);
+        it.key()->flush();
     }
     qInfo() << "[ConnectionManager] Sent URL to ALL students";
 }
@@ -676,6 +701,7 @@ void ConnectionManager::sendChatTo(const QString& studentId, const QString& send
         if (!it.value().helloReceived) continue;
         if (it.value().info.id == studentId) {
             it.key()->write(packet);
+            it.key()->flush();
             qInfo() << "[ConnectionManager] Sent chat to" << it.value().info.hostname;
             break;
         }
@@ -684,14 +710,15 @@ void ConnectionManager::sendChatTo(const QString& studentId, const QString& send
 
 void ConnectionManager::sendFile(const QStringList& studentIds, const QString& filePath, bool isFolder, const QString& destPath)
 {
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
+    auto sharedFile = QSharedPointer<QFile>::create(filePath);
+    if (!sharedFile->open(QIODevice::ReadOnly)) {
         qWarning() << "[ConnectionManager] Cannot open file:" << filePath;
         return;
     }
 
     QString fileName = QFileInfo(filePath).fileName();
-    qint64 fileSize = file.size();
+    qint64 fileSize = sharedFile->size();
+
     QList<QTcpSocket*> targets;
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
         if (!it.value().helloReceived) continue;
@@ -704,68 +731,116 @@ void ConnectionManager::sendFile(const QStringList& studentIds, const QString& f
         qWarning() << "[ConnectionManager] No matching students for file transfer";
         return;
     }
+
     QByteArray startPayload = createFileStartPayload(fileName, fileSize, isFolder, destPath);
     QByteArray startPacket = createPacket(MsgType::TRANSFER_START, startPayload);
     for (auto* s : targets) {
         s->write(startPacket);
     }
-    QByteArray fileData = file.readAll();
-    file.close();
 
-    // ── Increased chunk size for faster transfers (1 MB) ──
-    constexpr int CHUNK_SIZE = 1024 * 1024; // 1 MB chunks (was 512 KB)
-    int totalChunks = (fileData.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    // -- Streaming file transfer: read 512 KB per iteration from disk instead --
+    //    of loading the whole file into memory. This keeps teacher RSS flat
+    //    regardless of file size and of how many students we're sending to.
+    constexpr int CHUNK_SIZE = 512 * 1024;
+    const qint64 totalBytes = fileSize;
 
     qInfo() << "[ConnectionManager] Starting file transfer:" << fileName
-             << "size:" << fileSize << "chunks:" << totalChunks
+             << "size:" << fileSize << "targets:" << targets.size()
              << "dest:" << (destPath.isEmpty() ? "default" : destPath);
-    auto sharedData = QSharedPointer<QByteArray>::create(fileData);
-    auto sharedTargets = QSharedPointer<QList<QTcpSocket*>>::create(targets);
+
+    auto sharedTargets = QSharedPointer<QList<QPointer<QTcpSocket>>>::create();
+    for (auto* s : targets) sharedTargets->append(QPointer<QTcpSocket>(s));
     auto sharedFileName = QSharedPointer<QString>::create(fileName);
-    auto sharedIsFolder = QSharedPointer<bool>::create(isFolder);
-    auto sharedSendNextChunk = std::make_shared<std::function<void(int)>>();
-    *sharedSendNextChunk = [this, sharedData, sharedTargets, sharedFileName, sharedIsFolder,
-                            totalChunks, CHUNK_SIZE, sharedSendNextChunk](int idx) {
-        if (idx >= totalChunks) {
+    auto sharedSent = QSharedPointer<qint64>::create(0);
+
+    auto sharedSendNextChunk = std::make_shared<std::function<void()>>();
+    *sharedSendNextChunk = [this, sharedFile, sharedTargets, sharedFileName, sharedSent,
+                            totalBytes, sharedSendNextChunk]() {
+        // Bail out cleanly if the teacher closed while mid-transfer.
+        if (!sharedFile || !sharedFile->isOpen()) {
+            *sharedSendNextChunk = nullptr;
+            return;
+        }
+
+        // Check if we already flushed every byte.
+        if (*sharedSent >= totalBytes) {
             QByteArray endPayload = createFileEndPayload(*sharedFileName);
             QByteArray endPacket = createPacket(MsgType::TRANSFER_END, endPayload);
-            for (auto* s : *sharedTargets) {
+            for (auto& s : *sharedTargets) {
                 if (s && s->state() == QAbstractSocket::ConnectedState) {
                     s->write(endPacket);
                 }
             }
+            sharedFile->close();
             qInfo() << "[ConnectionManager] File transfer complete:" << *sharedFileName;
             emit fileTransferComplete(*sharedFileName);
+            *sharedSendNextChunk = nullptr; // break self-reference cycle
             return;
         }
 
-        int offset = idx * CHUNK_SIZE;
-        int len = qMin(CHUNK_SIZE, static_cast<int>(sharedData->size()) - offset);
-        QByteArray chunk = sharedData->mid(offset, len);
+        // Read next chunk from disk.
+        QByteArray chunk = sharedFile->read(CHUNK_SIZE);
+        if (chunk.isEmpty()) {
+            // Unexpected EOF - close out to avoid an infinite loop.
+            QByteArray endPayload = createFileEndPayload(*sharedFileName);
+            QByteArray endPacket = createPacket(MsgType::TRANSFER_END, endPayload);
+            for (auto& s : *sharedTargets) {
+                if (s && s->state() == QAbstractSocket::ConnectedState) {
+                    s->write(endPacket);
+                }
+            }
+            sharedFile->close();
+            emit fileTransferComplete(*sharedFileName);
+            *sharedSendNextChunk = nullptr;
+            return;
+        }
+
         QByteArray chunkPacket = createPacket(MsgType::TRANSFER_CHUNK, chunk);
 
-        for (auto* s : *sharedTargets) {
+        // Fan out to every connected target.
+        int liveTargets = 0;
+        for (auto& s : *sharedTargets) {
             if (s && s->state() == QAbstractSocket::ConnectedState) {
                 s->write(chunkPacket);
+                ++liveTargets;
             }
         }
 
-        int percent = static_cast<int>(((idx + 1) * 100) / totalChunks);
-        emit fileTransferProgress(*sharedFileName, percent);
+        // If every recipient dropped out mid-transfer, stop immediately.
+        if (liveTargets == 0) {
+            qWarning() << "[ConnectionManager] All recipients disconnected during"
+                          " file transfer - aborting";
+            sharedFile->close();
+            *sharedSendNextChunk = nullptr;
+            return;
+        }
 
-        // ── Adaptive delay: wait longer if sockets have large write buffers ──
+        *sharedSent += chunk.size();
+        int percent = totalBytes > 0
+            ? static_cast<int>((*sharedSent * 100) / totalBytes)
+            : 100;
+        emit fileTransferProgress(*sharedFileName, qBound(0, percent, 100));
+
+        // -- Adaptive backpressure: slow down if any recipient's write buffer --
+        //    is backing up. With 20 recipients on shared WiFi, the teacher can
+        //    produce data far faster than the network can drain it, and Qt's
+        //    socket buffer will eat all available RAM otherwise.
+        qint64 maxPending = 0;
+        for (auto& s : *sharedTargets) {
+            if (s) maxPending = qMax(maxPending, s->bytesToWrite());
+        }
         int delay = 2;
-        for (auto* s : *sharedTargets) {
-            if (s && s->bytesToWrite() > 4 * 1024 * 1024) {
-                delay = 50; // Back off if write buffer is getting full
-                break;
-            }
-        }
-        QTimer::singleShot(delay, this, [this, sharedSendNextChunk, idx]() {
-            (*sharedSendNextChunk)(idx + 1);
+        if      (maxPending > 16 * 1024 * 1024) delay = 400;
+        else if (maxPending >  8 * 1024 * 1024) delay = 150;
+        else if (maxPending >  4 * 1024 * 1024) delay = 60;
+        else if (maxPending >  1 * 1024 * 1024) delay = 10;
+
+        QTimer::singleShot(delay, this, [sharedSendNextChunk]() {
+            if (*sharedSendNextChunk) (*sharedSendNextChunk)();
         });
     };
-    (*sharedSendNextChunk)(0);
+
+    (*sharedSendNextChunk)();
 }
 
 void ConnectionManager::sendFileToAll(const QString& filePath, bool isFolder, const QString& destPath)

@@ -132,20 +132,8 @@ StudentGrid::StudentGrid(QWidget* parent)
     m_selectAllCheckbox->setToolTip("Select / Deselect All");
     m_selectAllCheckbox->setCursor(Qt::PointingHandCursor);
 
-    // Generate a checkmark SVG for crisp scaling in stylesheet
-    QString checkmarkPath = QCoreApplication::applicationDirPath() + "/checkmark.svg";
-    {
-        QFile f(checkmarkPath);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            f.write("<svg width='20' height='20' viewBox='0 0 20 20' xmlns='http://www.w3.org/2000/svg'>"
-                    "<path d='M5 10.5 L8.5 14 L15 6' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/>"
-                    "</svg>");
-            f.close();
-        }
-    }
-    // Use native path with forward slashes (Qt stylesheet requirement)
-    QString checkImgPath = checkmarkPath;
-    checkImgPath.replace('\\', '/');
+    // Use embedded checkmark resource for styling
+    QString checkImgPath = ":/icons/icons/checkmark.svg";
 
     m_selectAllCheckbox->setStyleSheet(QStringLiteral(
         "QCheckBox { spacing: 0px; }"
@@ -245,6 +233,12 @@ StudentTile* StudentGrid::addStudent(const StudentInfo& info)
             this, &StudentGrid::fullscreenOpened);
     connect(tile, &StudentTile::fullscreenClosed,
             this, &StudentGrid::fullscreenClosed);
+    connect(tile, &StudentTile::renameRequested,
+            this, &StudentGrid::renameRequested);
+    connect(tile, &StudentTile::renameCleared,
+            this, &StudentGrid::renameCleared);
+    connect(tile, &StudentTile::displayNameChanged,
+            this, &StudentGrid::displayNameChanged);
 
     m_flowLayout->addWidget(tile);
     m_tiles[info.id] = tile;

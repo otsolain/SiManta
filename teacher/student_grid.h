@@ -79,6 +79,11 @@ signals:
     void fullscreenOpened(const QString& studentId);
     void fullscreenClosed(const QString& studentId);
     void selectionChanged();
+    void renameRequested(const QString& studentId);
+    void renameCleared(const QString& studentId);
+    // Forwarded from any tile when its display name changes,
+    // so dialogs anywhere can refresh student labels live.
+    void displayNameChanged(const QString& studentId, const QString& newName);
 
 private slots:
     void onTileClicked(const QString& studentId);
